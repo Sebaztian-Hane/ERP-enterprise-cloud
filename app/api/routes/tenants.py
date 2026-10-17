@@ -1,0 +1,51 @@
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from app.db.session import get_db
+from app.models.entities import Tenant, TenantMembership
+from app.schemas.common import MembershipCreate, MembershipOut, TenantCreate, TenantOut
+from app.security.auth import Actor, get_user_id, require_permission
+from app.services.audit import record
+
+router = APIRouter(prefix="/tenants", tags=["tenants"])
+
+
+@router.get("/my", response_model=list[TenantOut])
+def my_tenants(user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
+    return db.scalars(select(Tenant).join(TenantMembership).where(TenantMembership.user_id == user_id, TenantMembership.is_active.is_(True), Tenant.is_active.is_(True)).order_by(Tenant.name)).all()
+
+
+@router.post("", response_model=TenantOut, status_code=status.HTTP_201_CREATED)
+def create_tenant(data: TenantCreate, user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
+    tenant = Tenant(name=data.name, timezone=data.timezone)
+    db.add(tenant)
+    db.flush()
+    db.add(TenantMembership(tenant_id=tenant.id, user_id=user_id, role_code="owner"))
+    record(db, tenant_id=tenant.id, actor_user_id=user_id, action="create", module="tenants", entity="tenant", entity_id=tenant.id)
+    db.commit()
+    db.refresh(tenant)
+    return tenant
+
+
+@router.get("/memberships", response_model=list[MembershipOut])
+def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    return db.scalars(select(TenantMembership).where(TenantMembership.tenant_id == actor.tenant_id).order_by(TenantMembership.created_at)).all()
+
+
+@router.post("/memberships", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
+def add_membership(data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    if data.role_code not in {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}:
+        raise HTTPException(status_code=422, detail="Rol no válido")
+    membership = TenantMembership(tenant_id=actor.tenant_id, user_id=data.user_id, role_code=data.role_code)
+    db.add(membership)
+    db.flush()
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="add_member", module="tenants", entity="tenant_membership", entity_id=membership.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El usuario ya tiene una membresía en esta empresa") from exc
+    db.refresh(membership)
+    return membership

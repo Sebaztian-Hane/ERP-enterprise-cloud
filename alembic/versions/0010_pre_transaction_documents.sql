@@ -1,0 +1,10 @@
+create table public.sales_quotes (
+ id uuid primary key default gen_random_uuid(), tenant_id uuid not null references public.tenants(id), number varchar(40) not null, customer_id uuid not null references public.customers(id), status varchar(16) not null default 'draft' check (status in ('draft','approved','cancelled')), total numeric(14,2) not null default 0, created_at timestamptz not null default now(), unique(tenant_id,number));
+create table public.sales_orders (
+ id uuid primary key default gen_random_uuid(), tenant_id uuid not null references public.tenants(id), number varchar(40) not null, customer_id uuid not null references public.customers(id), warehouse_id uuid not null references public.warehouses(id), status varchar(16) not null default 'draft' check (status in ('draft','confirmed','cancelled')), total numeric(14,2) not null default 0, created_at timestamptz not null default now(), unique(tenant_id,number));
+create table public.purchase_orders (
+ id uuid primary key default gen_random_uuid(), tenant_id uuid not null references public.tenants(id), number varchar(40) not null, supplier_id uuid not null references public.suppliers(id), warehouse_id uuid not null references public.warehouses(id), status varchar(16) not null default 'draft' check (status in ('draft','approved','cancelled')), total numeric(14,2) not null default 0, created_at timestamptz not null default now(), unique(tenant_id,number));
+alter table public.sales_quotes enable row level security; alter table public.sales_orders enable row level security; alter table public.purchase_orders enable row level security;
+create policy quotes_by_tenant on public.sales_quotes for all to authenticated using (public.is_active_member(tenant_id)) with check (public.is_active_member(tenant_id));
+create policy sales_orders_by_tenant on public.sales_orders for all to authenticated using (public.is_active_member(tenant_id)) with check (public.is_active_member(tenant_id));
+create policy purchase_orders_by_tenant on public.purchase_orders for all to authenticated using (public.is_active_member(tenant_id)) with check (public.is_active_member(tenant_id));
