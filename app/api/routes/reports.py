@@ -1,5 +1,6 @@
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -20,6 +21,43 @@ class DashboardOut(BaseModel):
     payments_total: Decimal
 
 
+class PeriodOut(BaseModel):
+    start_date: date
+    end_date: date
+    sales_total: Decimal
+    purchases_total: Decimal
+    receipts_total: Decimal
+    payments_total: Decimal
+
+
+class ReportSummaryOut(BaseModel):
+    current: PeriodOut
+    comparison: PeriodOut | None = None
+
+
+def period_bounds(start_date: date, end_date: date):
+    if end_date < start_date:
+        raise HTTPException(status_code=422, detail="La fecha final debe ser posterior a la fecha inicial")
+    return (
+        datetime.combine(start_date, time.min, tzinfo=timezone.utc),
+        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc),
+    )
+
+
+def totals_for_period(db: Session, tenant, start_date: date, end_date: date) -> PeriodOut:
+    start, end = period_bounds(start_date, end_date)
+    total = lambda statement: db.scalar(statement) or Decimal("0")
+    window = lambda model: (model.tenant_id == tenant, model.created_at >= start, model.created_at < end)
+    return PeriodOut(
+        start_date=start_date,
+        end_date=end_date,
+        sales_total=total(select(func.coalesce(func.sum(Sale.total), 0)).where(*window(Sale), Sale.status == "posted")),
+        purchases_total=total(select(func.coalesce(func.sum(Purchase.total), 0)).where(*window(Purchase), Purchase.status == "received")),
+        receipts_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(*window(Payment), Payment.payment_type == "receipt")),
+        payments_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(*window(Payment), Payment.payment_type == "payment")),
+    )
+
+
 @router.get("/dashboard", response_model=DashboardOut)
 def dashboard(actor: Actor = Depends(require_permission("reports:read")), db: Session = Depends(get_db)):
     tenant = actor.tenant_id
@@ -33,6 +71,21 @@ def dashboard(actor: Actor = Depends(require_permission("reports:read")), db: Se
         receipts_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.tenant_id == tenant, Payment.payment_type == "receipt")),
         payments_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.tenant_id == tenant, Payment.payment_type == "payment")),
     )
+
+
+@router.get("/summary", response_model=ReportSummaryOut)
+def report_summary(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    compare_start_date: date | None = Query(None),
+    compare_end_date: date | None = Query(None),
+    actor: Actor = Depends(require_permission("reports:read")),
+    db: Session = Depends(get_db),
+):
+    if (compare_start_date is None) != (compare_end_date is None):
+        raise HTTPException(status_code=422, detail="Indique ambas fechas para el comparativo")
+    comparison = totals_for_period(db, actor.tenant_id, compare_start_date, compare_end_date) if compare_start_date and compare_end_date else None
+    return ReportSummaryOut(current=totals_for_period(db, actor.tenant_id, start_date, end_date), comparison=comparison)
 
 @router.get("/receivables")
 def receivables(actor: Actor = Depends(require_permission("reports:read")), db: Session = Depends(get_db)):

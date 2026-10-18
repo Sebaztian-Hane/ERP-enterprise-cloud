@@ -84,6 +84,14 @@ async def invite_member(request: Request, data: MembershipInvite, actor: Actor =
         user_id = UUID(payload.get("user", payload)["id"])
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail="El servicio de invitaciones devolvió una respuesta no válida") from exc
+    membership = db.scalar(select(TenantMembership).where(TenantMembership.tenant_id == actor.tenant_id, TenantMembership.user_id == user_id))
+    if membership:
+        membership.role_code = data.role_code
+        membership.is_active = True
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="resend_invite", module="tenants", entity="tenant_membership", entity_id=membership.id)
+        db.commit()
+        db.refresh(membership)
+        return membership
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=user_id, role_code=data.role_code)
     db.add(membership)
     db.flush()
