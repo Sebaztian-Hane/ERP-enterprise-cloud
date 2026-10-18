@@ -1,6 +1,6 @@
 from uuid import UUID
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from sqlalchemy import select
@@ -23,7 +23,7 @@ def my_tenants(user_id: UUID = Depends(get_user_id), db: Session = Depends(get_d
 
 @router.post("", response_model=TenantOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/hour")
-def create_tenant(request: Request, data: TenantCreate, user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
+def create_tenant(request: Request, response: Response, data: TenantCreate, user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
     tenant = Tenant(name=data.name, timezone=data.timezone)
     db.add(tenant)
     db.flush()
@@ -41,7 +41,7 @@ def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")
 
 @router.post("/memberships", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("20/minute")
-def add_membership(request: Request, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+def add_membership(request: Request, response: Response, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=data.user_id, role_code=data.role_code)
@@ -59,7 +59,7 @@ def add_membership(request: Request, data: MembershipCreate, actor: Actor = Depe
 
 @router.post("/invitations", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
-async def invite_member(request: Request, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+async def invite_member(request: Request, response: Response, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
     settings = get_settings()
@@ -107,7 +107,7 @@ async def invite_member(request: Request, data: MembershipInvite, actor: Actor =
 
 @router.patch("/memberships/{membership_id}", response_model=MembershipOut)
 @limiter.limit("20/minute")
-def update_membership(request: Request, membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+def update_membership(request: Request, response: Response, membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == actor.tenant_id))
     if not membership:
         raise HTTPException(status_code=404, detail="Membresía no encontrada")

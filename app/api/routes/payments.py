@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.core.rate_limit import limiter
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +19,7 @@ def list_payments(actor: Actor = Depends(require_permission("payments:read")), d
 
 @router.post("", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("20/minute")
-def create_payment(request: Request, data: PaymentCreate, actor: Actor = Depends(require_permission("payments:write")), db: Session = Depends(get_db)):
+def create_payment(request: Request, response: Response, data: PaymentCreate, actor: Actor = Depends(require_permission("payments:write")), db: Session = Depends(get_db)):
     if data.customer_id and not db.scalar(select(Customer.id).where(Customer.id == data.customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True))):
         raise HTTPException(status_code=404, detail="Cliente no encontrado en la empresa activa")
     if data.supplier_id and not db.scalar(select(Supplier.id).where(Supplier.id == data.supplier_id, Supplier.tenant_id == actor.tenant_id, Supplier.is_active.is_(True))):
