@@ -80,7 +80,8 @@ async def invite_member(request: Request, data: MembershipInvite, actor: Actor =
     if response.status_code >= 400:
         raise HTTPException(status_code=422, detail="No fue posible enviar la invitación; verifica que el correo no tenga ya una cuenta activa")
     try:
-        user_id = UUID(response.json()["id"])
+        payload = response.json()
+        user_id = UUID(payload.get("user", payload)["id"])
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail="El servicio de invitaciones devolvió una respuesta no válida") from exc
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=user_id, role_code=data.role_code)
