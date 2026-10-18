@@ -11,6 +11,16 @@ API REST multiempresa para ERP EnterpriseCloud, construida con FastAPI, PostgreS
 
 La API queda disponible en `/docs`; el chequeo de servicio en `/health`. Los recursos disponibles inicialmente son clientes, proveedores, categorías, productos, almacenes, inventario, compras, ventas, pagos, documentos y dashboard.
 
+## Pruebas
+
+Ejecuta las pruebas con el entorno virtual del proyecto:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+GitHub Actions ejecuta esta verificación en cada cambio enviado a `main` y en cada pull request.
+
 ## Contrato de autenticación
 
 Envía `Authorization: Bearer <access_token_de_supabase>` y `X-Tenant-ID: <uuid>` en las rutas de negocio. El tenant nunca se toma del cuerpo de la solicitud. El servidor verifica que el usuario tenga una membresía activa y que su rol tenga el permiso necesario.
