@@ -13,6 +13,15 @@ from app.services.stock import change_stock
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
 
+@router.get("/warehouses")
+def list_purchase_warehouses(actor: Actor = Depends(require_permission("purchases:read")), db: Session = Depends(get_db)):
+    """Expose active warehouse identities required when receiving a purchase."""
+    return db.scalars(select(Warehouse).where(
+        Warehouse.tenant_id == actor.tenant_id,
+        Warehouse.is_active.is_(True),
+    ).order_by(Warehouse.name)).all()
+
+
 @router.get("", response_model=list[PurchaseOut])
 def list_purchases(actor: Actor = Depends(require_permission("purchases:read")), db: Session = Depends(get_db)):
     return db.scalars(select(Purchase).where(Purchase.tenant_id == actor.tenant_id).order_by(Purchase.created_at.desc())).all()
