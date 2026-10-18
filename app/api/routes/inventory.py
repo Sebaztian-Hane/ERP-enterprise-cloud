@@ -1,11 +1,12 @@
 from decimal import Decimal
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Inventory, InventoryMovement, InventoryTransfer, Product, Warehouse
-from app.schemas.inventory import InventoryMovementOut, InventoryOut, InventoryTransferCreate, InventoryTransferOut, StockAdjustment, WarehouseCreate, WarehouseOut
+from app.schemas.inventory import InventoryMovementOut, InventoryOut, InventoryTransferCreate, InventoryTransferOut, StockAdjustment, WarehouseCreate, WarehouseOut, WarehouseUpdate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
@@ -23,6 +24,23 @@ def create_warehouse(data: WarehouseCreate, actor: Actor = Depends(require_permi
     warehouse = Warehouse(tenant_id=actor.tenant_id, **data.model_dump())
     db.add(warehouse)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="inventory", entity="warehouse", entity_id=warehouse.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El código de almacén ya existe en esta empresa") from exc
+    db.refresh(warehouse)
+    return warehouse
+
+
+@router.patch("/warehouses/{warehouse_id}", response_model=WarehouseOut)
+def update_warehouse(warehouse_id: UUID, data: WarehouseUpdate, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    warehouse = db.scalar(select(Warehouse).where(Warehouse.id == warehouse_id, Warehouse.tenant_id == actor.tenant_id))
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Almacén no encontrado en la empresa activa")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(warehouse, field, value)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update", module="inventory", entity="warehouse", entity_id=warehouse.id)
     try:
         db.commit()
     except IntegrityError as exc:

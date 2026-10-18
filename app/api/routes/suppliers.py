@@ -1,10 +1,11 @@
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Supplier
-from app.schemas.catalog import SupplierCreate, SupplierOut
+from app.schemas.catalog import SupplierCreate, SupplierOut, SupplierUpdate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 
@@ -21,6 +22,23 @@ def create_supplier(data: SupplierCreate, actor: Actor = Depends(require_permiss
     supplier = Supplier(tenant_id=actor.tenant_id, **data.model_dump())
     db.add(supplier)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="suppliers", entity="supplier", entity_id=supplier.id)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El código de proveedor ya existe en esta empresa") from exc
+    db.refresh(supplier)
+    return supplier
+
+
+@router.patch("/{supplier_id}", response_model=SupplierOut)
+def update_supplier(supplier_id: UUID, data: SupplierUpdate, actor: Actor = Depends(require_permission("suppliers:write")), db: Session = Depends(get_db)):
+    supplier = db.scalar(select(Supplier).where(Supplier.id == supplier_id, Supplier.tenant_id == actor.tenant_id))
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Proveedor no encontrado en la empresa activa")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(supplier, field, value)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update", module="suppliers", entity="supplier", entity_id=supplier.id)
     try:
         db.commit()
     except IntegrityError as exc:

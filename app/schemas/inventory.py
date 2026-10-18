@@ -15,6 +15,13 @@ class WarehouseOut(WarehouseCreate, ORMModel):
     is_active: bool
 
 
+class WarehouseUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    address: str | None = None
+    is_active: bool | None = None
+
+
 class StockAdjustment(BaseModel):
     product_id: UUID
     warehouse_id: UUID

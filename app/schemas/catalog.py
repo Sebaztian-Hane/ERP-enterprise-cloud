@@ -18,6 +18,16 @@ class CustomerOut(CustomerCreate, ORMModel):
     is_active: bool
 
 
+class CustomerUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    email: str | None = None
+    phone: str | None = None
+    tax_id: str | None = None
+    credit_limit: Decimal | None = Field(default=None, ge=0)
+    is_active: bool | None = None
+
+
 class CategoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str | None = None
@@ -40,6 +50,15 @@ class ProductOut(ProductCreate, ORMModel):
     is_active: bool
 
 
+class ProductUpdate(BaseModel):
+    sku: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    category_id: UUID | None = None
+    unit: str | None = Field(default=None, min_length=1, max_length=16)
+    sale_price: Decimal | None = Field(default=None, ge=0)
+    is_active: bool | None = None
+
+
 class SupplierCreate(BaseModel):
     code: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=160)
@@ -51,3 +70,12 @@ class SupplierCreate(BaseModel):
 class SupplierOut(SupplierCreate, ORMModel):
     id: UUID
     is_active: bool
+
+
+class SupplierUpdate(BaseModel):
+    code: str | None = Field(default=None, min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    email: str | None = None
+    phone: str | None = None
+    tax_id: str | None = None
+    is_active: bool | None = None
