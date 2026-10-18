@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Tenant, TenantMembership
 from app.schemas.common import TenantOut
-from app.security.auth import Actor, get_actor
+from app.security.auth import Actor, get_actor, get_user_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -17,7 +17,7 @@ def me(request: Request, actor: Actor = Depends(get_actor)) -> Actor:
 
 
 @router.get("/tenants", response_model=list[TenantOut])
-def available_tenants(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+def available_tenants(user_id = Depends(get_user_id), db: Session = Depends(get_db)):
     return db.scalars(select(Tenant).join(TenantMembership).where(
-        TenantMembership.user_id == actor.user_id, TenantMembership.is_active.is_(True), Tenant.is_active.is_(True)
+        TenantMembership.user_id == user_id, TenantMembership.is_active.is_(True), Tenant.is_active.is_(True)
     ).order_by(Tenant.name)).all()
