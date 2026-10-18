@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
 from app.api.routes.customers import list_customers
+from app.api.routes.tenants import ensure_active_owner_remains, require_owner_role_change
+from app.schemas.common import MembershipUpdate
 from app.security import auth
 from app.security.auth import Actor, get_actor, require_permission
 
@@ -70,3 +72,17 @@ def test_customer_listing_is_scoped_to_actor_tenant():
     compiled = statement.compile(dialect=postgresql.dialect())
     assert tenant_id in compiled.params.values()
     assert "customers.tenant_id" in str(compiled)
+
+
+def test_only_owner_can_assign_owner_role():
+    with pytest.raises(HTTPException) as error:
+        require_owner_role_change(Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="admin"), "owner")
+    assert error.value.status_code == 403
+
+
+def test_last_active_owner_cannot_be_suspended():
+    membership = SimpleNamespace(id=uuid4(), tenant_id=uuid4(), role_code="owner", is_active=True)
+    db = SimpleNamespace(scalar=lambda _: 1)
+    with pytest.raises(HTTPException) as error:
+        ensure_active_owner_remains(db, membership, MembershipUpdate(is_active=False))
+    assert error.value.status_code == 422

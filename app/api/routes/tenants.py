@@ -3,7 +3,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -14,6 +14,25 @@ from app.services.audit import record
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 VALID_ROLES = {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}
+
+
+def require_owner_role_change(actor: Actor, role_code: str) -> None:
+    if role_code == "owner" and actor.role_code != "owner":
+        raise HTTPException(status_code=403, detail="Solo un propietario puede asignar el rol de propietario")
+
+
+def ensure_active_owner_remains(db: Session, membership: TenantMembership, changes: MembershipUpdate) -> None:
+    loses_owner = membership.is_active and membership.role_code == "owner" and (
+        changes.is_active is False or (changes.role_code is not None and changes.role_code != "owner")
+    )
+    if loses_owner:
+        owners = db.scalar(select(func.count(TenantMembership.id)).where(
+            TenantMembership.tenant_id == membership.tenant_id,
+            TenantMembership.role_code == "owner",
+            TenantMembership.is_active.is_(True),
+        )) or 0
+        if owners <= 1:
+            raise HTTPException(status_code=422, detail="La empresa debe conservar al menos un propietario activo")
 
 
 @router.get("/my", response_model=list[TenantOut])
@@ -44,6 +63,7 @@ def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")
 def add_membership(request: Request, response: Response, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
+    require_owner_role_change(actor, data.role_code)
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=data.user_id, role_code=data.role_code)
     db.add(membership)
     db.flush()
@@ -62,6 +82,7 @@ def add_membership(request: Request, response: Response, data: MembershipCreate,
 async def invite_member(request: Request, response: Response, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
+    require_owner_role_change(actor, data.role_code)
     settings = get_settings()
     if not settings.supabase_service_role_key:
         raise HTTPException(status_code=503, detail="El servicio de invitaciones no está configurado")
@@ -114,6 +135,11 @@ def update_membership(request: Request, response: Response, membership_id: UUID,
     if data.role_code is not None:
         if data.role_code not in VALID_ROLES:
             raise HTTPException(status_code=422, detail="Rol no válido")
+        require_owner_role_change(actor, data.role_code)
+    if membership.role_code == "owner" and actor.role_code != "owner":
+        raise HTTPException(status_code=403, detail="Solo un propietario puede modificar otro propietario")
+    ensure_active_owner_remains(db, membership, data)
+    if data.role_code is not None:
         membership.role_code = data.role_code
     if data.is_active is not None:
         if membership.user_id == actor.user_id and not data.is_active:
