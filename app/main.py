@@ -5,8 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlalchemy import text
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.db.session import engine
 from app.core.rate_limit import limiter
 
 settings = get_settings()
@@ -37,3 +39,18 @@ async def request_trace(request: Request, call_next):
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok", "environment": settings.app_env}
+
+
+@app.get("/ready", tags=["system"])
+def readiness():
+    """Indica si la API puede atender tráfico con su dependencia principal."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception:
+        logging.exception("readiness_database_error")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "dependency": "database"},
+        )
+    return {"status": "ok", "dependency": "database"}

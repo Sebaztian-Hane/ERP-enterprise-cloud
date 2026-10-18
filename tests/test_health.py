@@ -14,3 +14,9 @@ def test_health_endpoint():
     response = TestClient(app).get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "environment": "test"}
+
+
+def test_readiness_endpoint():
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "dependency": "database"}

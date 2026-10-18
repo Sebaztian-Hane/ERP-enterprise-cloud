@@ -9,7 +9,7 @@ API REST multiempresa para ERP EnterpriseCloud, construida con FastAPI, PostgreS
 3. Ejecuta la migración SQL `alembic/versions/0001_initial_schema.sql` en el SQL Editor de Supabase o con `psql`.
 4. Inicia el servidor: `py -m uvicorn app.main:app --reload`.
 
-La API queda disponible en `/docs`; el chequeo de servicio en `/health`. Los recursos disponibles inicialmente son clientes, proveedores, categorías, productos, almacenes, inventario, compras, ventas, pagos, documentos y dashboard.
+La API queda disponible en `/docs`; el chequeo básico en `/health` y el de disponibilidad con base de datos en `/ready`. Los recursos disponibles inicialmente son clientes, proveedores, categorías, productos, almacenes, inventario, compras, ventas, pagos, documentos y dashboard.
 
 ## Pruebas
 
@@ -30,3 +30,11 @@ Envía `Authorization: Bearer <access_token_de_supabase>` y `X-Tenant-ID: <uuid>
 Usa el Dockerfile, define el comando por defecto y configura `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_JWT_ISSUER`, `SUPABASE_JWKS_URL` (o `SUPABASE_JWT_SECRET`) y `CORS_ORIGINS` como variables privadas. No agregues una service-role key al frontend.
 
 Para la carga de documentos, añade también `SUPABASE_SERVICE_ROLE_KEY` solo en Render. La API usa esta clave internamente para escribir en el bucket privado `erp-documents`; no debe enviarse al navegador.
+
+## Operación, monitoreo y recuperación
+
+- Configura Render para supervisar `/ready`: devuelve `200` solo si la API puede conectarse a PostgreSQL; un error de base de datos devuelve `503`.
+- Revisa los logs de Render después de cada despliegue y usa `/health` para comprobar que el proceso está vivo, y `/ready` para comprobar que está listo para recibir tráfico.
+- Antes de operar con datos reales, establece en Supabase una política de respaldos compatible con tu plan. Conserva copias lógicas cifradas fuera de la aplicación y prueba una restauración en una base de datos de prueba de forma periódica.
+- Documenta y ensaya la recuperación: crear una base de prueba, restaurar el respaldo, verificar los tenants, usuarios, ventas e inventario y sólo entonces autorizar una recuperación de producción.
+- Las credenciales de base de datos, claves de servicio y respaldos no se guardan en el repositorio ni en variables públicas del frontend.

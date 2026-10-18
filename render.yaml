@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     region: oregon
-    healthCheckPath: /health
+    healthCheckPath: /ready
     dockerfilePath: ./Dockerfile
     dockerContext: .
     autoDeployTrigger: commit
