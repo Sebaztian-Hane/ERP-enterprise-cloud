@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 
 class ORMModel(BaseModel):
@@ -39,6 +39,11 @@ class MembershipOut(ORMModel):
 class MembershipUpdate(BaseModel):
     role_code: str | None = None
     is_active: bool | None = None
+
+
+class MembershipInvite(BaseModel):
+    email: EmailStr
+    role_code: str
 
 
 class AuditLogOut(ORMModel):

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str | None = Field(default=None, repr=False)
     supabase_service_role_key: str | None = Field(default=None, repr=False)
     documents_bucket: str = "erp-documents"
+    invite_redirect_url: str | None = None
     max_document_size_bytes: int = 10_485_760
     cors_origins: str = "http://localhost:5173"
 
