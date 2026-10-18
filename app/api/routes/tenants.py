@@ -1,5 +1,6 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from app.core.rate_limit import limiter
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,7 +19,8 @@ def my_tenants(user_id: UUID = Depends(get_user_id), db: Session = Depends(get_d
 
 
 @router.post("", response_model=TenantOut, status_code=status.HTTP_201_CREATED)
-def create_tenant(data: TenantCreate, user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
+@limiter.limit("5/hour")
+def create_tenant(request: Request, data: TenantCreate, user_id: UUID = Depends(get_user_id), db: Session = Depends(get_db)):
     tenant = Tenant(name=data.name, timezone=data.timezone)
     db.add(tenant)
     db.flush()
@@ -35,7 +37,8 @@ def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")
 
 
 @router.post("/memberships", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
-def add_membership(data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+@limiter.limit("20/minute")
+def add_membership(request: Request, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     if data.role_code not in {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}:
         raise HTTPException(status_code=422, detail="Rol no válido")
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=data.user_id, role_code=data.role_code)
@@ -52,7 +55,8 @@ def add_membership(data: MembershipCreate, actor: Actor = Depends(require_permis
 
 
 @router.patch("/memberships/{membership_id}", response_model=MembershipOut)
-def update_membership(membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+@limiter.limit("20/minute")
+def update_membership(request: Request, membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
     membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == actor.tenant_id))
     if not membership:
         raise HTTPException(status_code=404, detail="Membresía no encontrada")

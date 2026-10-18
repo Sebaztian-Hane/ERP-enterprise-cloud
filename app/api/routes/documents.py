@@ -1,9 +1,10 @@
 from pathlib import PurePath
 from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
+from app.core.rate_limit import limiter
 from app.db.session import get_db
 from app.models.entities import Document
 from app.schemas.documents import DocumentOut, SignedUrlOut
@@ -21,7 +22,8 @@ def list_documents(actor: Actor = Depends(require_permission("documents:read")),
 
 
 @router.post("", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
-async def upload_document(file: UploadFile = File(...), entity_type: str | None = Form(None), entity_id: UUID | None = Form(None), actor: Actor = Depends(require_permission("documents:write")), db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+async def upload_document(request: Request, file: UploadFile = File(...), entity_type: str | None = Form(None), entity_id: UUID | None = Form(None), actor: Actor = Depends(require_permission("documents:write")), db: Session = Depends(get_db)):
     settings = get_settings()
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(status_code=415, detail="Tipo de archivo no permitido")
@@ -41,7 +43,8 @@ async def upload_document(file: UploadFile = File(...), entity_type: str | None 
 
 
 @router.post("/{document_id}/signed-url", response_model=SignedUrlOut)
-async def create_download_url(document_id: UUID, actor: Actor = Depends(require_permission("documents:read")), db: Session = Depends(get_db)):
+@limiter.limit("30/minute")
+async def create_download_url(request: Request, document_id: UUID, actor: Actor = Depends(require_permission("documents:read")), db: Session = Depends(get_db)):
     document = db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == actor.tenant_id))
     if not document:
         raise HTTPException(status_code=404, detail="Documento no encontrado")

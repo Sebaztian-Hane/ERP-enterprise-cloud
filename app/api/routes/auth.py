@@ -17,7 +17,8 @@ def me(request: Request, actor: Actor = Depends(get_actor)) -> Actor:
 
 
 @router.get("/tenants", response_model=list[TenantOut])
-def available_tenants(user_id = Depends(get_user_id), db: Session = Depends(get_db)):
+@limiter.limit("30/minute")
+def available_tenants(request: Request, user_id = Depends(get_user_id), db: Session = Depends(get_db)):
     return db.scalars(select(Tenant).join(TenantMembership).where(
         TenantMembership.user_id == user_id, TenantMembership.is_active.is_(True), Tenant.is_active.is_(True)
     ).order_by(Tenant.name)).all()

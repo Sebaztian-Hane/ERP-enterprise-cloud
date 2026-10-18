@@ -24,6 +24,12 @@ async def request_trace(request: Request, call_next):
     except Exception:
         logging.exception("unhandled_request_error path=%s", request.url.path)
         return JSONResponse(status_code=500, content={"detail": "Error interno del servidor"})
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if settings.app_env == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     logging.info("request method=%s path=%s status=%s", request.method, request.url.path, response.status_code)
     return response
 
