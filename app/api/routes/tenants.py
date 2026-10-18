@@ -4,8 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Tenant, TenantMembership
-from app.schemas.common import MembershipCreate, MembershipOut, TenantCreate, TenantOut
+from app.models.entities import AuditLog, Tenant, TenantMembership
+from app.schemas.common import AuditLogOut, MembershipCreate, MembershipOut, MembershipUpdate, TenantCreate, TenantOut
 from app.security.auth import Actor, get_user_id, require_permission
 from app.services.audit import record
 
@@ -49,3 +49,28 @@ def add_membership(data: MembershipCreate, actor: Actor = Depends(require_permis
         raise HTTPException(status_code=409, detail="El usuario ya tiene una membresía en esta empresa") from exc
     db.refresh(membership)
     return membership
+
+
+@router.patch("/memberships/{membership_id}", response_model=MembershipOut)
+def update_membership(membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == actor.tenant_id))
+    if not membership:
+        raise HTTPException(status_code=404, detail="Membresía no encontrada")
+    if data.role_code is not None:
+        if data.role_code not in {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}:
+            raise HTTPException(status_code=422, detail="Rol no válido")
+        membership.role_code = data.role_code
+    if data.is_active is not None:
+        if membership.user_id == actor.user_id and not data.is_active:
+            raise HTTPException(status_code=422, detail="No puede desactivar su propio acceso")
+        membership.is_active = data.is_active
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update_member", module="tenants", entity="tenant_membership", entity_id=membership.id)
+    db.commit()
+    db.refresh(membership)
+    return membership
+
+
+@router.get("/audit-logs", response_model=list[AuditLogOut])
+def list_audit_logs(limit: int = 50, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    safe_limit = min(max(limit, 1), 200)
+    return db.scalars(select(AuditLog).where(AuditLog.tenant_id == actor.tenant_id).order_by(AuditLog.created_at.desc()).limit(safe_limit)).all()
