@@ -15,12 +15,15 @@ Esta integración tiene dos flujos independientes:
 ERP_API_URL=https://erp-enterprisecloud-api.onrender.com/api/v1
 ERP_RAG_INTEGRATION_KEY=<secreto-aleatorio-de-32-o-mas-caracteres>
 ERP_RAG_WEBHOOK_SECRET=<secreto-aleatorio-distinto-de-32-o-mas-caracteres>
+ERP_RAG_ENFORCE_HMAC=false
 SUPABASE_RAG_URL=https://<nuevo-proyecto>.supabase.co
 SUPABASE_RAG_SERVICE_ROLE_KEY=<service_role-del-nuevo-proyecto>
 NODE_FUNCTION_ALLOW_BUILTIN=crypto
 ```
 
 `NODE_FUNCTION_ALLOW_BUILTIN=crypto` permite a los nodos Code verificar el HMAC de los webhooks. No expongas ninguna de estas variables en Vercel ni en el frontend.
+
+Durante la puesta en marcha puede mantenerse `ERP_RAG_ENFORCE_HMAC=false` para comprobar la conectividad de extremo a extremo. Es una excepción temporal: una vez que `ERP_RAG_WEBHOOK_SECRET` sea idéntico al secreto `RAG_CHAT_WEBHOOK_SECRET` del ERP, cambia el valor a `true` y publica el workflow. Con `true`, cada petición se valida por firma y por antigüedad de cinco minutos.
 
 4. Importa ambos JSON y asigna estas credenciales mediante la interfaz de n8n:
    - `Google Gemini(PaLM) Api account` a ambos nodos **Embeddings Google Gemini**.
