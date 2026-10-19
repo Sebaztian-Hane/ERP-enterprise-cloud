@@ -8,6 +8,8 @@ from app.models.entities import Supplier
 from app.schemas.catalog import SupplierCreate, SupplierOut, SupplierUpdate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.core.config import get_settings
+from app.services.decolecta import DecolectaError, lookup_tax_id
 
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
@@ -15,6 +17,33 @@ router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 @router.get("", response_model=list[SupplierOut])
 def list_suppliers(actor: Actor = Depends(require_permission("suppliers:read")), db: Session = Depends(get_db)):
     return db.scalars(select(Supplier).where(Supplier.tenant_id == actor.tenant_id).order_by(Supplier.name)).all()
+
+
+@router.get("/lookup/{tax_id}")
+def lookup_supplier_ruc(tax_id: str, actor: Actor = Depends(require_permission("suppliers:read")), db: Session = Depends(get_db)):
+    """Prefill a supplier from SUNAT and identify a prior supplier by RUC."""
+    normalized = tax_id.strip()
+    if not normalized.isdigit() or len(normalized) != 11:
+        raise HTTPException(status_code=422, detail="Ingresa un RUC de 11 dígitos")
+    existing = db.scalar(select(Supplier).where(Supplier.tenant_id == actor.tenant_id, Supplier.tax_id == normalized))
+    if existing:
+        return {
+            "existing_supplier_id": str(existing.id),
+            "tax_id": existing.tax_id,
+            "name": existing.name,
+            "email": existing.email or "",
+            "phone": existing.phone or "",
+            "address": existing.address or "",
+            "document_type": "RUC",
+            "source": "erp",
+        }
+    try:
+        result = lookup_tax_id(get_settings(), normalized)
+    except DecolectaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result["document_type"] != "RUC":
+        raise HTTPException(status_code=422, detail="Ingresa un RUC de 11 dígitos")
+    return {"existing_supplier_id": None, **result, "source": "decolecta"}
 
 
 @router.post("", response_model=SupplierOut, status_code=status.HTTP_201_CREATED)
@@ -26,7 +55,7 @@ def create_supplier(data: SupplierCreate, actor: Actor = Depends(require_permiss
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="El código de proveedor ya existe en esta empresa") from exc
+        raise HTTPException(status_code=409, detail="Ya existe un proveedor con ese código o RUC en esta empresa") from exc
     db.refresh(supplier)
     return supplier
 
@@ -43,6 +72,6 @@ def update_supplier(supplier_id: UUID, data: SupplierUpdate, actor: Actor = Depe
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="El código de proveedor ya existe en esta empresa") from exc
+        raise HTTPException(status_code=409, detail="Ya existe un proveedor con ese código o RUC en esta empresa") from exc
     db.refresh(supplier)
     return supplier

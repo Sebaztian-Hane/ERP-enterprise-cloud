@@ -1,6 +1,6 @@
 from decimal import Decimal
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from app.schemas.common import ORMModel
 
 
@@ -65,6 +65,17 @@ class SupplierCreate(BaseModel):
     email: str | None = None
     phone: str | None = None
     tax_id: str | None = None
+    address: str | None = Field(default=None, max_length=500)
+
+    @field_validator("tax_id")
+    @classmethod
+    def validate_ruc(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip()
+        if not normalized.isdigit() or len(normalized) != 11:
+            raise ValueError("El RUC debe tener 11 dígitos")
+        return normalized
 
 
 class SupplierOut(SupplierCreate, ORMModel):
@@ -78,4 +89,15 @@ class SupplierUpdate(BaseModel):
     email: str | None = None
     phone: str | None = None
     tax_id: str | None = None
+    address: str | None = Field(default=None, max_length=500)
     is_active: bool | None = None
+
+    @field_validator("tax_id")
+    @classmethod
+    def validate_ruc(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip()
+        if not normalized.isdigit() or len(normalized) != 11:
+            raise ValueError("El RUC debe tener 11 dígitos")
+        return normalized
