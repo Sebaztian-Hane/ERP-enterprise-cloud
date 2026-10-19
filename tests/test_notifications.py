@@ -7,6 +7,7 @@ from app.api.routes import notifications
 from app.api.routes.payments import _same_payment_request
 from app.schemas.payments import PaymentCreate
 from app.security.auth import Actor
+from app.services import audit
 
 
 class CaptureDb:
@@ -70,3 +71,26 @@ def test_payment_retry_must_match_the_original_financial_data():
     assert _same_payment_request(Existing(), data)
     Existing.amount = data.amount + 1
     assert not _same_payment_request(Existing(), data)
+
+
+def test_audit_record_accepts_optional_detail(monkeypatch):
+    class AuditDb:
+        def __init__(self):
+            self.items = []
+
+        def add(self, item):
+            self.items.append(item)
+
+    monkeypatch.setattr(audit, "queue_sync_event", lambda *_args, **_kwargs: None)
+    db = AuditDb()
+    audit.record(
+        db,
+        tenant_id=uuid4(),
+        actor_user_id=uuid4(),
+        action="create_from_sale",
+        module="customers",
+        entity="customer",
+        detail="Cliente creado durante venta",
+    )
+
+    assert db.items[0].detail == "Cliente creado durante venta"

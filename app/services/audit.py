@@ -7,7 +7,28 @@ from app.services.rag_sync import queue_sync_event
 RAG_SYNC_MODULES = {"customers", "products", "suppliers", "inventory", "sales", "purchases", "payments", "tenants"}
 
 
-def record(db: Session, *, tenant_id: UUID, actor_user_id: UUID, action: str, module: str, entity: str, entity_id: UUID | None = None) -> None:
-    db.add(AuditLog(tenant_id=tenant_id, actor_user_id=actor_user_id, action=action, module=module, entity=entity, entity_id=entity_id))
+def record(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    actor_user_id: UUID,
+    action: str,
+    module: str,
+    entity: str,
+    entity_id: UUID | None = None,
+    detail: str | None = None,
+) -> None:
+    """Write an auditable event and optionally keep a human-readable detail."""
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action=action,
+            module=module,
+            entity=entity,
+            entity_id=entity_id,
+            detail=detail,
+        )
+    )
     if module in RAG_SYNC_MODULES:
         queue_sync_event(db, tenant_id=tenant_id, module=module, entity=entity, entity_id=entity_id, action=action)
