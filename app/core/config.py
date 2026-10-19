@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     supabase_service_role_key: str | None = Field(default=None, repr=False)
     documents_bucket: str = "erp-documents"
     invite_redirect_url: str | None = None
+    # Mail is sent only from the API. These values are Render secrets and must
+    # never be exposed through the frontend or persisted in the database.
+    brevo_api_key: str | None = Field(default=None, repr=False)
+    brevo_sender_email: str | None = None
+    brevo_sender_name: str = "EnterpriseCloud"
+    password_change_code_ttl_minutes: int = 10
     max_document_size_bytes: int = 10_485_760
     cors_origins: str = "http://localhost:5173"
     # RAG is intentionally decoupled from the transactional Supabase project.

@@ -11,6 +11,8 @@ from app.models.entities import AuditLog, Tenant, TenantMembership
 from app.schemas.common import AuditLogOut, MembershipCreate, MembershipInvite, MembershipOut, MembershipUpdate, TenantCreate, TenantOut
 from app.security.auth import Actor, get_user_id, require_permission
 from app.services.audit import record
+from app.services.brevo import invitation_html, send_brevo_email
+from app.services.supabase_admin import create_user
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 VALID_ROLES = {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}
@@ -86,33 +88,15 @@ async def invite_member(request: Request, response: Response, data: MembershipIn
     settings = get_settings()
     if not settings.supabase_service_role_key:
         raise HTTPException(status_code=503, detail="El servicio de invitaciones no está configurado")
-    body = {"email": str(data.email)}
-    if settings.invite_redirect_url:
-        body["redirect_to"] = settings.invite_redirect_url
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(
-                f"{str(settings.supabase_url).rstrip('/')}/auth/v1/invite",
-                headers={"Authorization": f"Bearer {settings.supabase_service_role_key}", "apikey": settings.supabase_service_role_key},
-                json=body,
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="No fue posible contactar el servicio de invitaciones") from exc
-    if response.status_code >= 400:
-        raise HTTPException(status_code=422, detail="No fue posible enviar la invitación; verifica que el correo no tenga ya una cuenta activa")
-    try:
-        payload = response.json()
-        user_id = UUID(payload.get("user", payload)["id"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail="El servicio de invitaciones devolvió una respuesta no válida") from exc
+    # Credentials are created server-side and travel only once to the exact
+    # email entered by the administrator. Existing global accounts are not
+    # overwritten, avoiding a cross-company administrator resetting a password.
+    user_id = await create_user(settings, email=str(data.email), temporary_password=data.temporary_password)
     membership = db.scalar(select(TenantMembership).where(TenantMembership.tenant_id == actor.tenant_id, TenantMembership.user_id == user_id))
     if membership:
         membership.role_code = data.role_code
         membership.is_active = True
-        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="resend_invite", module="tenants", entity="tenant_membership", entity_id=membership.id)
-        db.commit()
-        db.refresh(membership)
-        return membership
+        raise HTTPException(status_code=409, detail="La cuenta ya tiene acceso a esta empresa; no se reemplazó su contraseña.")
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=user_id, role_code=data.role_code)
     db.add(membership)
     db.flush()
@@ -123,6 +107,12 @@ async def invite_member(request: Request, response: Response, data: MembershipIn
         db.rollback()
         raise HTTPException(status_code=409, detail="El usuario ya tiene acceso a esta empresa") from exc
     db.refresh(membership)
+    await send_brevo_email(
+        settings,
+        recipient=str(data.email),
+        subject="Tus credenciales temporales de EnterpriseCloud",
+        html=invitation_html(temporary_password=data.temporary_password, tenant_name=db.get(Tenant, actor.tenant_id).name, role=data.role_code),
+    )
     return membership
 
 

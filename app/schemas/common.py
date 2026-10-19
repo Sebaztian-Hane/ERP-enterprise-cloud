@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class ORMModel(BaseModel):
@@ -44,6 +44,16 @@ class MembershipUpdate(BaseModel):
 class MembershipInvite(BaseModel):
     email: EmailStr
     role_code: str
+    temporary_password: str = Field(min_length=12, max_length=128)
+
+
+class PasswordChangeRequest(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class PasswordChangeConfirm(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 class AuditLogOut(ORMModel):
