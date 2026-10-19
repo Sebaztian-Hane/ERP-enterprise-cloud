@@ -172,6 +172,7 @@
             },
             "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
             "typeVersion": 1.3,
+            "alwaysOutputData": true,
             "position": [
                 1840,
                 300
