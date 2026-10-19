@@ -53,7 +53,7 @@
         },
         {
             "parameters": {
-                "jsCode": "const isWebhook = Boolean($json.headers);\nif (!isWebhook) return [{ json: { tenant_id: null, trigger: 'scheduled' } }];\n// Modo temporal sin variables del VPS. El ERP emite el evento después del\n// commit; activa HMAC cuando el secreto compartido esté disponible.\nif (!$json.body?.tenant_id) throw new Error('Evento sin tenant_id');\nreturn [{json:{tenant_id:$json.body.tenant_id,trigger:'event'}}];"
+        "jsCode": "// Los disparadores Manual y Schedule pueden entregar un objeto con headers vacío.\n// Solo el Webhook contiene la propiedad body: así no se confunde una carga inicial\n// con un evento incompleto.\nconst isWebhook = Object.prototype.hasOwnProperty.call($json, 'body');\nif (!isWebhook) return [{ json: { tenant_id: null, trigger: 'scheduled' } }];\n// Modo temporal sin variables del VPS. El ERP emite el evento después del\n// commit; activa HMAC cuando el secreto compartido esté disponible.\nif (!$json.body?.tenant_id) throw new Error('Evento sin tenant_id');\nreturn [{json:{tenant_id:$json.body.tenant_id,trigger:'event'}}];"
             },
             "type": "n8n-nodes-base.code",
             "typeVersion": 2,
@@ -352,14 +352,14 @@
         },
         "Procesar un documento a la vez": {
             "main": [
-                [
-                    {
-                        "node": "Supabase Vector Store",
-                        "type": "main",
-                        "index": 0
-                    }
-                ],
-                []
+        [],
+        [
+          {
+            "node": "Supabase Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
             ]
         },
         "Supabase Vector Store": {

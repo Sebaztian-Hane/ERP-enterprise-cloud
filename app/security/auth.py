@@ -87,3 +87,10 @@ def require_permission(permission: str):
             raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
         return actor
     return check
+
+
+def require_owner_or_admin(actor: Actor = Depends(get_actor)) -> Actor:
+    """Protect bulk migrations independently from each module's write permission."""
+    if actor.role_code not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Solo el propietario o un administrador puede migrar datos")
+    return actor
