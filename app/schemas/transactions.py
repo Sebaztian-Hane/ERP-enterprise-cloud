@@ -1,13 +1,20 @@
 from decimal import Decimal
 from uuid import UUID
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas.common import ORMModel
 
 
 class SaleLineCreate(BaseModel):
     product_id: UUID
-    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=3)
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     unit_price: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
 
 
 class SaleCreate(BaseModel):
@@ -36,8 +43,15 @@ class SaleOut(ORMModel):
 
 class PurchaseLineCreate(BaseModel):
     product_id: UUID
-    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=3)
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     unit_cost: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
 
 
 class PurchaseCreate(BaseModel):

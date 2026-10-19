@@ -25,7 +25,7 @@ class WarehouseUpdate(BaseModel):
 class StockAdjustment(BaseModel):
     product_id: UUID
     warehouse_id: UUID
-    quantity: Decimal = Field(max_digits=14, decimal_places=3)
+    quantity: Decimal = Field(max_digits=14, decimal_places=0)
     reference: str | None = Field(default=None, max_length=100)
     note: str | None = None
 
@@ -34,6 +34,8 @@ class StockAdjustment(BaseModel):
     def quantity_must_not_be_zero(cls, value: Decimal) -> Decimal:
         if value == 0:
             raise ValueError("La cantidad no puede ser cero")
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
         return value
 
 
@@ -59,7 +61,7 @@ class InventoryTransferCreate(BaseModel):
     product_id: UUID
     source_warehouse_id: UUID
     destination_warehouse_id: UUID
-    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=3)
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     note: str | None = None
 
     @model_validator(mode="after")
@@ -67,6 +69,13 @@ class InventoryTransferCreate(BaseModel):
         if self.source_warehouse_id == self.destination_warehouse_id:
             raise ValueError("Los almacenes deben ser diferentes")
         return self
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
 
 
 class InventoryTransferOut(ORMModel):

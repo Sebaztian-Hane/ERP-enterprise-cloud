@@ -1,7 +1,7 @@
 from uuid import UUID
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -24,8 +24,15 @@ class StatusChange(BaseModel):
 
 class WorkflowLine(BaseModel):
     product_id: UUID
-    quantity: Decimal = Field(gt=0)
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     unit_value: Decimal = Field(ge=0)
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
 
 def _register(prefix: str, table: str, counterparty: str, counterparty_model, write_permission: str, allowed: set[str]):
     @router.get(prefix)
