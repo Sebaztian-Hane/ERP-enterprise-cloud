@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     invite_redirect_url: str | None = None
     max_document_size_bytes: int = 10_485_760
     cors_origins: str = "http://localhost:5173"
+    # RAG is intentionally decoupled from the transactional Supabase project.
+    # These values authenticate only the ERP <> n8n integration.
+    rag_integration_key: str | None = Field(default=None, repr=False)
+    rag_sync_webhook_url: AnyHttpUrl | None = None
+    rag_sync_webhook_secret: str | None = Field(default=None, repr=False)
+    rag_chat_webhook_url: AnyHttpUrl | None = None
+    rag_chat_webhook_secret: str | None = Field(default=None, repr=False)
 
     @property
     def cors_origin_list(self) -> list[str]:

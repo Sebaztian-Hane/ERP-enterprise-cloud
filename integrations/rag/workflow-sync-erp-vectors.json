@@ -1,0 +1,64 @@
+{
+  "name": "Sincronizar ERP a Supabase Vector",
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "erp-rag-sync", "responseMode": "lastNode", "options": {"rawBody": true}},
+      "id": "sync-webhook", "name": "Webhook ERP", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [-900, 0],
+      "webhookId": "erp-rag-sync"
+    },
+    {
+      "parameters": {"rule": {"interval": [{"field": "hours", "hoursInterval": 1}]}},
+      "id": "sync-schedule", "name": "Respaldo cada hora", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [-900, 180]
+    },
+    {
+      "parameters": {}, "id": "sync-manual", "name": "Carga inicial manual", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [-900, 360]
+    },
+    {
+      "parameters": {"jsCode": "const isWebhook = Boolean($json.headers);\nif (!isWebhook) return [{ json: { tenant_id: null, trigger: 'scheduled' } }];\nconst crypto = require('crypto');\nconst timestamp = $json.headers['x-erp-timestamp'];\nconst received = $json.headers['x-erp-signature'];\nconst raw = $json.rawBody || JSON.stringify($json.body || {});\nif (!timestamp || !received || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) throw new Error('Webhook ERP vencido o incompleto');\nconst expected = 'sha256=' + crypto.createHmac('sha256', $env.ERP_RAG_WEBHOOK_SECRET).update(`${timestamp}.${raw}`).digest('hex');\nconst receivedBuffer = Buffer.from(received);\nconst expectedBuffer = Buffer.from(expected);\nif (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) throw new Error('Firma HMAC inválida');\nconst event = $json.body || {};\nif (!event.tenant_id) throw new Error('Evento sin tenant_id');\nreturn [{ json: { tenant_id: event.tenant_id, trigger: 'event' } }];"},
+      "id": "verify-sync", "name": "Verificar evento ERP", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [-660, 120]
+    },
+    {
+      "parameters": {"url": "={{ $env.ERP_API_URL + '/rag/tenants' }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-RAG-Integration-Key", "value": "={{ $env.ERP_RAG_INTEGRATION_KEY }}"}]}, "options": {}},
+      "id": "list-tenants", "name": "Listar empresas ERP", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [-420, 120]
+    },
+    {
+      "parameters": {"jsCode": "const tenantId = $('Verificar evento ERP').first().json.tenant_id;\nif (tenantId) return [{ json: { tenant_id: tenantId } }];\nreturn ($json.tenants || []).map((tenant) => ({ json: { tenant_id: tenant.id } }));"},
+      "id": "choose-tenants", "name": "Elegir empresas a indexar", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [-180, 120]
+    },
+    {
+      "parameters": {"url": "={{ $env.ERP_API_URL + '/rag/export?tenant_id=' + $json.tenant_id }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-RAG-Integration-Key", "value": "={{ $env.ERP_RAG_INTEGRATION_KEY }}"}]}, "options": {}},
+      "id": "export-tenant", "name": "Exportar datos seguros", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [60, 120]
+    },
+    {
+      "parameters": {"jsCode": "return ($json.documents || []).map((document) => ({ json: document }));"},
+      "id": "split-documents", "name": "Separar documentos", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [300, 120]
+    },
+    {
+      "parameters": {"method": "POST", "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + ($env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001') + ':embedContent?key=' + $env.GEMINI_API_KEY }}", "sendBody": true, "specifyBody": "json", "jsonBody": "={\"model\":\"models/{{ $env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001' }}\",\"content\":{\"parts\":[{\"text\":{{ JSON.stringify($json.content) }}]},\"outputDimensionality\":768}", "options": {"batching": {"batch": {"batchSize": 1, "batchInterval": 150}}}},
+      "id": "gemini-embed", "name": "Embeddings Gemini", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [540, 120]
+    },
+    {
+      "parameters": {"jsCode": "const document = $('Separar documentos').item.json;\nconst embedding = $json.embedding?.values;\nif (!Array.isArray(embedding) || embedding.length !== 768) throw new Error('Gemini no devolvió embedding de 768 dimensiones');\nreturn [{ json: { ...document, content_hash: require('crypto').createHash('sha256').update(document.content).digest('hex'), embedded_at: new Date().toISOString(), embedding } }];"},
+      "id": "prepare-vector", "name": "Preparar vector", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [780, 120]
+    },
+    {
+      "parameters": {"method": "POST", "url": "={{ $env.SUPABASE_RAG_URL + '/rest/v1/rag_documents?on_conflict=id' }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "apikey", "value": "={{ $env.SUPABASE_RAG_SERVICE_ROLE_KEY }}"}, {"name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_RAG_SERVICE_ROLE_KEY }}"}, {"name": "Prefer", "value": "resolution=merge-duplicates,return=minimal"}]}, "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify($json) }}", "options": {}},
+      "id": "upsert-vector", "name": "Upsert Supabase Vector", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [1020, 120]
+    }
+  ],
+  "connections": {
+    "Webhook ERP": {"main": [[{"node": "Verificar evento ERP", "type": "main", "index": 0}]]},
+    "Respaldo cada hora": {"main": [[{"node": "Verificar evento ERP", "type": "main", "index": 0}]]},
+    "Carga inicial manual": {"main": [[{"node": "Verificar evento ERP", "type": "main", "index": 0}]]},
+    "Verificar evento ERP": {"main": [[{"node": "Listar empresas ERP", "type": "main", "index": 0}]]},
+    "Listar empresas ERP": {"main": [[{"node": "Elegir empresas a indexar", "type": "main", "index": 0}]]},
+    "Elegir empresas a indexar": {"main": [[{"node": "Exportar datos seguros", "type": "main", "index": 0}]]},
+    "Exportar datos seguros": {"main": [[{"node": "Separar documentos", "type": "main", "index": 0}]]},
+    "Separar documentos": {"main": [[{"node": "Embeddings Gemini", "type": "main", "index": 0}]]},
+    "Embeddings Gemini": {"main": [[{"node": "Preparar vector", "type": "main", "index": 0}]]},
+    "Preparar vector": {"main": [[{"node": "Upsert Supabase Vector", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "versionId": "1"
+}

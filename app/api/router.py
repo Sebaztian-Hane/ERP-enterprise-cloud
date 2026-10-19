@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import accounts, auth, customers, documents, inventory, notifications, payments, products, purchases, reconciliation, reports, sales, suppliers, tenants, treasury, workflow
+from app.api.routes import accounts, auth, customers, documents, inventory, notifications, payments, products, purchases, rag, reconciliation, reports, sales, suppliers, tenants, treasury, workflow
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
@@ -18,3 +18,4 @@ api_router.include_router(workflow.router)
 api_router.include_router(treasury.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(notifications.router)
+api_router.include_router(rag.router)

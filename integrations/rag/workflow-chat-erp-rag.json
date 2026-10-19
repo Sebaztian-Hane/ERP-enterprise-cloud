@@ -1,0 +1,55 @@
+{
+  "name": "Asistente RAG ERP EnterpriseCloud",
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "erp-rag-chat", "responseMode": "responseNode", "options": {"rawBody": true}},
+      "id": "chat-webhook", "name": "Webhook chat ERP", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [-900, 0],
+      "webhookId": "erp-rag-chat"
+    },
+    {
+      "parameters": {"jsCode": "const crypto = require('crypto');\nconst timestamp = $json.headers?.['x-erp-timestamp'];\nconst received = $json.headers?.['x-erp-signature'];\nconst raw = $json.rawBody || JSON.stringify($json.body || {});\nif (!timestamp || !received || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) throw new Error('Solicitud vencida o incompleta');\nconst expected = 'sha256=' + crypto.createHmac('sha256', $env.ERP_RAG_WEBHOOK_SECRET).update(`${timestamp}.${raw}`).digest('hex');\nconst receivedBuffer = Buffer.from(received);\nconst expectedBuffer = Buffer.from(expected);\nif (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) throw new Error('Firma HMAC inválida');\nconst request = $json.body || {};\nif (!request.tenant_id || !request.user_id || !request.message) throw new Error('Solicitud de chat incompleta');\nreturn [{ json: request }];"},
+      "id": "verify-chat", "name": "Verificar solicitud ERP", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [-660, 0]
+    },
+    {
+      "parameters": {"method": "POST", "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + ($env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001') + ':embedContent?key=' + $env.GEMINI_API_KEY }}", "sendBody": true, "specifyBody": "json", "jsonBody": "={\"model\":\"models/{{ $env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001' }}\",\"content\":{\"parts\":[{\"text\":{{ JSON.stringify($json.message) }}]},\"outputDimensionality\":768}", "options": {}},
+      "id": "embed-question", "name": "Embedding de la pregunta", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [-420, 0]
+    },
+    {
+      "parameters": {"jsCode": "const request = $('Verificar solicitud ERP').first().json;\nconst embedding = $json.embedding?.values;\nif (!Array.isArray(embedding) || embedding.length !== 768) throw new Error('Embedding de consulta inválido');\nreturn [{ json: { query_embedding: embedding, match_tenant_id: request.tenant_id, match_count: 8, match_threshold: 0.55 } }];"},
+      "id": "prepare-search", "name": "Preparar búsqueda aislada", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [-180, 0]
+    },
+    {
+      "parameters": {"method": "POST", "url": "={{ $env.SUPABASE_RAG_URL + '/rest/v1/rpc/match_rag_documents' }}", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "apikey", "value": "={{ $env.SUPABASE_RAG_SERVICE_ROLE_KEY }}"}, {"name": "Authorization", "value": "={{ 'Bearer ' + $env.SUPABASE_RAG_SERVICE_ROLE_KEY }}"}]}, "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify($json) }}", "options": {}},
+      "id": "vector-search", "name": "Buscar contexto de la empresa", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [60, 0]
+    },
+    {
+      "parameters": {"jsCode": "const request = $('Verificar solicitud ERP').first().json;\nconst found = Array.isArray($json) ? $json : ($json.data || []);\nconst context = found.slice(0, 8).map((d, index) => `[${index + 1}] ${d.title}: ${d.content}`).join('\\n\\n') || 'No hay datos empresariales relevantes indexados para esta pregunta.';\nconst system = `Eres EnterpriseCloud Assistant, un asistente de ERP profesional. Responde en español claro y conciso. Usa exclusivamente el contexto recuperado para datos concretos de la empresa. Si no hay evidencia, dilo y sugiere el módulo ERP pertinente. No inventes cifras, no reveles secretos, no des instrucciones para evadir controles y no ejecutes cambios. La información pertenece a una empresa aislada.\\n\\nCONTEXTO ERP:\\n${context}`;\nreturn [{ json: { model: $env.DEEPSEEK_CHAT_MODEL || 'deepseek-chat', temperature: 0.2, max_tokens: 700, messages: [{ role: 'system', content: system }, { role: 'user', content: request.message }], sources: found.map((d) => ({ title: d.title, similarity: d.similarity, source: d.metadata?.source })) } }];"},
+      "id": "build-prompt", "name": "Construir respuesta con contexto", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [300, 0]
+    },
+    {
+      "parameters": {"method": "POST", "url": "https://api.deepseek.com/chat/completions", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "Authorization", "value": "={{ 'Bearer ' + $env.DEEPSEEK_API_KEY }}"}]}, "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify({ model: $json.model, temperature: $json.temperature, max_tokens: $json.max_tokens, messages: $json.messages }) }}", "options": {}},
+      "id": "deepseek-chat", "name": "Responder con DeepSeek", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [540, 0]
+    },
+    {
+      "parameters": {"jsCode": "const prompt = $('Construir respuesta con contexto').first().json;\nreturn [{ json: { answer: $json.choices?.[0]?.message?.content || 'No pude generar una respuesta en este momento.', sources: prompt.sources || [] } }];"},
+      "id": "format-answer", "name": "Formatear respuesta segura", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [780, 0]
+    },
+    {
+      "parameters": {"respondWith": "json", "responseBody": "={{ JSON.stringify($json) }}", "options": {}},
+      "id": "respond-chat", "name": "Responder al ERP", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.1, "position": [1020, 0]
+    }
+  ],
+  "connections": {
+    "Webhook chat ERP": {"main": [[{"node": "Verificar solicitud ERP", "type": "main", "index": 0}]]},
+    "Verificar solicitud ERP": {"main": [[{"node": "Embedding de la pregunta", "type": "main", "index": 0}]]},
+    "Embedding de la pregunta": {"main": [[{"node": "Preparar búsqueda aislada", "type": "main", "index": 0}]]},
+    "Preparar búsqueda aislada": {"main": [[{"node": "Buscar contexto de la empresa", "type": "main", "index": 0}]]},
+    "Buscar contexto de la empresa": {"main": [[{"node": "Construir respuesta con contexto", "type": "main", "index": 0}]]},
+    "Construir respuesta con contexto": {"main": [[{"node": "Responder con DeepSeek", "type": "main", "index": 0}]]},
+    "Responder con DeepSeek": {"main": [[{"node": "Formatear respuesta segura", "type": "main", "index": 0}]]},
+    "Formatear respuesta segura": {"main": [[{"node": "Responder al ERP", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "versionId": "1"
+}
