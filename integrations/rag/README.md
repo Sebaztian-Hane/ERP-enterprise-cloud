@@ -5,7 +5,27 @@ Esta integración tiene dos flujos independientes:
 1. `workflow-sync-erp-vectors.json`: recibe eventos del ERP y hace una reindexación programada de respaldo. Obtiene datos operativos normalizados, genera embeddings con Gemini y los guarda en el proyecto vectorial.
 2. `workflow-chat-erp-rag.json`: recibe consultas firmadas por el backend, busca contexto solamente del `tenant_id` del usuario y responde mediante DeepSeek.
 
-## Antes de importar
+## Importación temporal sin acceso al VPS
+
+Los JSON incluidos actualmente no dependen de variables de entorno de n8n.
+Antes de activarlos, crea estas credenciales nativas desde **Credentials**:
+
+1. **ERP RAG Integration** — tipo **Header Auth**:
+   - Header name: `X-RAG-Integration-Key`
+   - Header value: el valor de `RAG_INTEGRATION_KEY` que ya tienes en Render.
+   Asígnala a **Listar empresas ERP** y **Exportar datos seguros del ERP**.
+2. La credencial **Supabase API** del proyecto vectorial
+   `zxkbupniddyysqbbkwkz`, con su service role. Asígnala a
+   **Limpiar vectores previos de la empresa**, **Supabase Vector Store** y
+   **Buscar conocimiento ERP**.
+3. Tus credenciales existentes de **Google Gemini** para ambos nodos de
+   embeddings y de **DeepSeek** para el modelo de chat.
+
+Este modo omite temporalmente la verificación HMAC del webhook. No contiene
+ninguna clave en el JSON, pero debe reemplazarse por la variante con HMAC al
+recuperar el acceso a Easypanel.
+
+## Configuración con variables del VPS
 
 1. Crea el nuevo proyecto de Supabase destinado exclusivamente al RAG.
 2. En su SQL Editor, ejecuta `supabase-vector.sql` completo.
