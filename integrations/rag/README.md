@@ -17,16 +17,16 @@ ERP_RAG_INTEGRATION_KEY=<secreto-aleatorio-de-32-o-mas-caracteres>
 ERP_RAG_WEBHOOK_SECRET=<secreto-aleatorio-distinto-de-32-o-mas-caracteres>
 SUPABASE_RAG_URL=https://<nuevo-proyecto>.supabase.co
 SUPABASE_RAG_SERVICE_ROLE_KEY=<service_role-del-nuevo-proyecto>
-GEMINI_API_KEY=<clave-de-Gemini>
-GEMINI_EMBEDDING_MODEL=gemini-embedding-2
-DEEPSEEK_API_KEY=<clave-de-DeepSeek>
-DEEPSEEK_CHAT_MODEL=deepseek-chat
 NODE_FUNCTION_ALLOW_BUILTIN=crypto
 ```
 
 `NODE_FUNCTION_ALLOW_BUILTIN=crypto` permite a los nodos Code verificar el HMAC de los webhooks. No expongas ninguna de estas variables en Vercel ni en el frontend.
 
-4. Importa ambos JSON en n8n y actívalos. Copia las URLs de producción de los nodos Webhook.
+4. Importa ambos JSON y asigna estas credenciales mediante la interfaz de n8n:
+   - `Google Gemini(PaLM) Api account` a ambos nodos **Embeddings Google Gemini**.
+   - `DeepSeek account` al nodo **DeepSeek Chat Model**.
+   - Una credencial Supabase con la URL y `service_role` del proyecto RAG a los nodos **Supabase Vector Store** y **Buscar conocimiento ERP**.
+   Luego actívalos y copia las URLs de producción de los nodos Webhook.
 5. En Render configura, con los mismos secretos:
 
 ```env
@@ -42,9 +42,9 @@ RAG_CHAT_WEBHOOK_SECRET=<ERP_RAG_WEBHOOK_SECRET>
 - La API de exportación requiere `X-RAG-Integration-Key` y no incluye correos, RUC/DNI, contraseñas, archivos ni identidades de usuarios.
 - Cada documento vectorial contiene un `tenant_id`; la función de búsqueda lo exige como filtro, por lo que no hay búsqueda entre empresas.
 - El frontend no conoce ni la URL privada de n8n ni credenciales de Gemini, DeepSeek o Supabase. Usará `POST /api/v1/rag/chat`, autenticado con el JWT actual del ERP.
-- La memoria de conversación se guarda en `rag_chat_messages`, segregada por empresa, usuario y conversación. Se conservan solo los últimos diez mensajes como contexto.
+- La memoria de conversación usa una clave compuesta por empresa, usuario y conversación; conserva solo los últimos diez mensajes como contexto.
 - Los cambios operativos generan un evento solo después del `commit`; el cron del workflow vuelve a indexar todas las empresas como recuperación ante caídas temporales.
 
 ## Primera carga y operación
 
-Ejecuta manualmente `Sincronizar ERP a Supabase Vector` una vez para la carga inicial. Luego quedan activos el webhook por cambios y el cron cada hora. Si cambias el modelo/dimensión de Gemini, crea una migración y re-embebe todo: una búsqueda solo es válida cuando consulta y documentos usan el mismo modelo y dimensión.
+Ejecuta manualmente `Sincronizar ERP a Supabase Vector (nativo)` una vez para la carga inicial. Luego quedan activos el webhook por cambios y el cron cada hora. El flujo usa los nodos nativos **AI Agent**, **Supabase Vector Store**, **Embeddings Google Gemini** y **DeepSeek Chat Model**. Gemini Embedding 2 opera a 3072 dimensiones en esta configuración; si cambias de modelo o dimensión, reindexa todos los documentos.

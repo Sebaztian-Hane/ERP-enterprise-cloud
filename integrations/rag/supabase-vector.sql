@@ -1,75 +1,65 @@
--- ERP EnterpriseCloud RAG vector store (separate Supabase project)
--- Run this once in the SQL Editor of the NEW Supabase project.
--- gemini-embedding-001 is requested with outputDimensionality 768 in the n8n workflow.
+-- ERP EnterpriseCloud RAG store for n8n native LangChain nodes.
+-- Gemini Embedding 2 defaults to 3072 dimensions. halfvec permits an HNSW
+-- index at this dimension while keeping the standard n8n documents schema.
 create extension if not exists vector with schema extensions;
 
-create table if not exists public.rag_documents (
-  id text primary key,
-  tenant_id uuid not null,
-  source text not null,
-  title text not null,
+create table if not exists public.documents (
+  id bigint generated always as identity primary key,
   content text not null,
   metadata jsonb not null default '{}'::jsonb,
-  content_hash text,
-  updated_at timestamptz,
-  embedded_at timestamptz not null default now(),
-  embedding extensions.vector(768) not null
-);
-
-create index if not exists rag_documents_tenant_source_idx
-  on public.rag_documents (tenant_id, source);
-create index if not exists rag_documents_embedding_hnsw_idx
-  on public.rag_documents using hnsw (embedding vector_cosine_ops);
-
-alter table public.rag_documents enable row level security;
--- No browser policy is deliberately created. Only the server-side Supabase service-role
--- credential in n8n may read/write this table.
-revoke all on table public.rag_documents from anon, authenticated;
-
-create table if not exists public.rag_chat_messages (
-  id bigint generated always as identity primary key,
-  tenant_id uuid not null,
-  user_id uuid not null,
-  conversation_id text not null,
-  role text not null check (role in ('user', 'assistant')),
-  content text not null check (char_length(content) <= 8000),
+  embedding extensions.halfvec(3072) not null,
   created_at timestamptz not null default now()
 );
 
-create index if not exists rag_chat_messages_scope_idx
-  on public.rag_chat_messages (tenant_id, user_id, conversation_id, created_at desc);
-alter table public.rag_chat_messages enable row level security;
-revoke all on table public.rag_chat_messages from anon, authenticated;
+create index if not exists documents_embedding_hnsw_idx
+  on public.documents using hnsw (embedding extensions.halfvec_cosine_ops);
+create index if not exists documents_tenant_idx
+  on public.documents ((metadata->>'tenant_id'));
 
-create or replace function public.match_rag_documents(
-  query_embedding extensions.vector(768),
-  match_tenant_id uuid,
+alter table public.documents enable row level security;
+revoke all on table public.documents from anon, authenticated;
+
+-- This is the exact function signature used by n8n Supabase Vector Store.
+-- A missing tenant filter fails closed, instead of returning another company.
+create or replace function public.match_documents(
+  query_embedding extensions.halfvec(3072),
   match_count integer default 8,
-  match_threshold double precision default 0.55
+  filter jsonb default '{}'::jsonb
 )
 returns table (
-  id text,
-  title text,
+  id bigint,
   content text,
   metadata jsonb,
   similarity double precision
 )
-language sql
+language plpgsql
 stable
 set search_path = public, extensions
 as $$
-  select
-    d.id,
-    d.title,
-    d.content,
-    d.metadata,
-    1 - (d.embedding <=> query_embedding) as similarity
-  from public.rag_documents d
-  where d.tenant_id = match_tenant_id
-    and 1 - (d.embedding <=> query_embedding) >= match_threshold
+begin
+  if not (filter ? 'tenant_id') then
+    raise exception 'tenant_id filter is required';
+  end if;
+
+  return query
+  select d.id, d.content, d.metadata, 1 - (d.embedding <=> query_embedding) as similarity
+  from public.documents d
+  where d.metadata @> filter
   order by d.embedding <=> query_embedding
   limit greatest(1, least(match_count, 20));
+end;
 $$;
 
-revoke all on function public.match_rag_documents(extensions.vector, uuid, integer, double precision)
+create or replace function public.delete_erp_tenant_documents(p_tenant_id uuid)
+returns void
+language sql
+security invoker
+set search_path = public
+as $$
+  delete from public.documents where metadata->>'tenant_id' = p_tenant_id::text;
+$$;
+
+revoke all on function public.match_documents(extensions.halfvec, integer, jsonb)
+  from public, anon, authenticated;
+revoke all on function public.delete_erp_tenant_documents(uuid)
   from public, anon, authenticated;
