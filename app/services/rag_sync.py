@@ -29,7 +29,18 @@ def require_rag_integration_key(
 ) -> None:
     """Authenticate machine-to-machine RAG reads without a browser JWT."""
     configured = get_settings().rag_integration_key
-    if not configured or not x_rag_integration_key or not compare_digest(configured, x_rag_integration_key):
+    # ``secrets.compare_digest`` only accepts text made exclusively of ASCII
+    # characters. Comparing encoded values preserves its constant-time behavior
+    # for any valid secret and turns a malformed key into a normal 401 response
+    # instead of leaking an internal 500 error to n8n.
+    matches = (
+        bool(configured and x_rag_integration_key)
+        and compare_digest(
+            configured.encode("utf-8"),
+            x_rag_integration_key.encode("utf-8"),
+        )
+    )
+    if not matches:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credencial de integración RAG inválida")
 
 
