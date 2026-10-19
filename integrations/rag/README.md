@@ -44,6 +44,8 @@ RAG_CHAT_WEBHOOK_SECRET=<ERP_RAG_WEBHOOK_SECRET>
 
 - La API de exportación requiere `X-RAG-Integration-Key` y no incluye correos, RUC/DNI, contraseñas, archivos ni identidades de usuarios.
 - Cada documento vectorial contiene un `tenant_id`; la función de búsqueda lo exige como filtro, por lo que no hay búsqueda entre empresas.
+- El backend rechaza una consulta sobre un dominio que el rol no puede leer antes de enviarla a n8n. Además, el workflow recibe `allowed_sources` y la búsqueda vectorial filtra por esas fuentes. Por ejemplo, Ventas puede consultar catálogo y ventas, pero nunca los vectores de existencias.
+- El exportador separa `product_catalog` de `inventory_stock`. Tras importar la actualización del workflow, ejecuta una sincronización completa para reemplazar los documentos anteriores que contenían precio y stock en el mismo vector.
 - El frontend no conoce ni la URL privada de n8n ni credenciales de Gemini, DeepSeek o Supabase. Usará `POST /api/v1/rag/chat`, autenticado con el JWT actual del ERP.
 - La memoria de conversación usa una clave compuesta por empresa, usuario y conversación; conserva solo los últimos diez mensajes como contexto.
 - Los cambios operativos generan un evento solo después del `commit`; el cron del workflow vuelve a indexar todas las empresas como recuperación ante caídas temporales.

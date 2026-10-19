@@ -103,11 +103,21 @@ def export_tenant_documents(db: Session, tenant_id: UUID) -> list[dict[str, Any]
     """), {"tenant": str(tenant_id)}).mappings()
     for row in product_rows:
         documents.append(_document(
-            tenant_id=tenant_id, source="product", record_id=row["id"], title=f"Producto: {row['name']}",
+            # Catalogue facts and stock are intentionally separate documents.
+            # A commercial role may consult a price without the vector search
+            # ever receiving inventory quantities for that role.
+            tenant_id=tenant_id, source="product_catalog", record_id=row["id"], title=f"Producto: {row['name']}",
             content=(f"Producto {row['name']} (SKU {row['sku']}). Categoría: {row['category_name'] or 'Sin categoría'}. "
                      f"Unidad: {row['unit']}. Precio de venta: S/ {row['sale_price']}. "
-                     f"Stock disponible: {row['stock_units']}. Estado: {'activo' if row['is_active'] else 'inactivo'} ."),
-            updated_at=row["updated_at"], metadata={"sku": row["sku"], "category": row["category_name"], "stock_units": _value(row["stock_units"])},
+                     f"Estado: {'activo' if row['is_active'] else 'inactivo'} ."),
+            updated_at=row["updated_at"], metadata={"sku": row["sku"], "category": row["category_name"]},
+        ))
+        documents.append(_document(
+            tenant_id=tenant_id, source="inventory_stock", record_id=row["id"], title=f"Existencias: {row['name']}",
+            content=(f"Inventario del producto {row['name']} (SKU {row['sku']}). "
+                     f"Stock disponible: {row['stock_units']}. Unidad: {row['unit']}. "
+                     f"Estado del producto: {'activo' if row['is_active'] else 'inactivo'}."),
+            updated_at=row["updated_at"], metadata={"sku": row["sku"], "stock_units": _value(row["stock_units"])},
         ))
 
     for source, table, label in (("customer", "customers", "Cliente"), ("supplier", "suppliers", "Proveedor"), ("warehouse", "warehouses", "Almacén")):

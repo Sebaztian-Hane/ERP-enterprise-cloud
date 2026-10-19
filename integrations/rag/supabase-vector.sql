@@ -44,7 +44,13 @@ begin
   return query
   select d.id, d.content, d.metadata, 1 - (d.embedding <=> query_embedding) as similarity
   from public.documents d
-  where d.metadata @> filter
+  where d.metadata->>'tenant_id' = filter->>'tenant_id'
+    and (
+      not (filter ? 'allowed_sources')
+      or d.metadata->>'source' in (
+        select jsonb_array_elements_text(filter->'allowed_sources')
+      )
+    )
   order by d.embedding <=> query_embedding
   limit greatest(1, least(match_count, 20));
 end;

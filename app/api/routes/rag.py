@@ -24,6 +24,7 @@ from app.services.rag_sync import (
     require_rag_integration_key,
     signed_request,
 )
+from app.services.rag_access import assistant_scope, denied_message, denied_topic
 
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
@@ -209,6 +210,23 @@ def chat_with_rag(
     db.commit()
     db.refresh(conversation)
 
+    # Authorization is enforced here, before sending anything to the external
+    # workflow.  It is not enough to ask the language model to behave: a
+    # restricted question must never reach retrieval in the first place.
+    restricted_topic = denied_topic(message, actor.role_code)
+    if restricted_topic:
+        answer = denied_message(actor.role_code, restricted_topic)
+        db.add(AssistantMessage(
+            conversation_id=conversation.id,
+            tenant_id=actor.tenant_id,
+            user_id=actor.user_id,
+            role="assistant",
+            content=answer,
+        ))
+        conversation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"answer": answer, "conversation_id": str(conversation.id)}
+
     settings = get_settings()
     if not settings.rag_chat_webhook_url or not settings.rag_chat_webhook_secret:
         raise HTTPException(
@@ -222,11 +240,14 @@ def chat_with_rag(
         .order_by(AssistantMessage.created_at.desc())
         .limit(12)
     ).all()
+    scope = assistant_scope(actor.role_code)
     event = {
         "message": message,
         "tenant_id": str(actor.tenant_id),
         "user_id": str(actor.user_id),
         "role_code": actor.role_code,
+        "allowed_topics": list(scope.allowed_topics),
+        "allowed_sources": list(scope.allowed_sources),
         "conversation_id": str(conversation.id),
         "history": [{"role": item.role, "content": item.content} for item in reversed(history)],
     }
