@@ -62,6 +62,12 @@ def test_permission_denies_role_without_write_access():
     assert error.value.status_code == 403
 
 
+def test_sales_role_can_issue_its_own_electronic_documents():
+    check = require_permission("electronic_billing:write")
+    actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="sales")
+    assert check(actor) == actor
+
+
 def test_customer_listing_is_scoped_to_actor_tenant():
     tenant_id = uuid4()
     customer = SimpleNamespace(id=uuid4(), tenant_id=tenant_id, name="Empresa A")
