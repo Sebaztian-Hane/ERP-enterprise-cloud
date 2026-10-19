@@ -150,18 +150,38 @@ def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: 
 
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
 def post_sale(data: SaleCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
-    customer = db.scalar(select(Customer.id).where(Customer.id == data.customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True)))
+    customer_id = data.customer_id
+    if data.customer:
+        existing = db.scalar(select(Customer).where(Customer.tenant_id == actor.tenant_id, Customer.tax_id == data.customer.tax_id).with_for_update())
+        if existing:
+            if not existing.is_active:
+                raise HTTPException(status_code=409, detail="El cliente asociado a este documento está inactivo")
+            customer_id = existing.id
+        else:
+            customer = Customer(
+                tenant_id=actor.tenant_id,
+                code=f"CLI-{data.customer.tax_id}",
+                name=data.customer.name.strip(),
+                tax_id=data.customer.tax_id,
+                email=data.customer.email or None,
+                phone=data.customer.phone or None,
+            )
+            db.add(customer)
+            db.flush()
+            customer_id = customer.id
+            record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_from_sale", module="customers", entity="customer", entity_id=customer.id, detail=f"Cliente creado durante venta: {data.customer.tax_id}")
+    customer = db.scalar(select(Customer.id).where(Customer.id == customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True)))
     warehouse = db.scalar(select(Warehouse.id).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
     product_ids = {line.product_id for line in data.lines}
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
     if not customer or not warehouse or products != product_ids:
         raise HTTPException(status_code=404, detail="Cliente, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_price for line in data.lines), Decimal("0"))
-    sale = Sale(tenant_id=actor.tenant_id, number=data.number, customer_id=data.customer_id, warehouse_id=data.warehouse_id, status="posted", total=total, note=data.note)
+    sale = Sale(tenant_id=actor.tenant_id, number=data.number, customer_id=customer_id, warehouse_id=data.warehouse_id, status="posted", total=total, note=data.note)
     db.add(sale)
     try:
         db.flush()
-        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=data.customer_id, original_amount=total, balance_amount=total, status="open"))
+        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open"))
         for line in data.lines:
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=line.quantity * line.unit_price))
             change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=-line.quantity, movement_type="issue", reference=data.number)

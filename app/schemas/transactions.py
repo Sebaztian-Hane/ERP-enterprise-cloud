@@ -18,9 +18,25 @@ class SaleLineCreate(BaseModel):
         return value
 
 
+class SaleCustomerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    tax_id: str = Field(min_length=8, max_length=11)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=40)
+
+    @field_validator("tax_id")
+    @classmethod
+    def fiscal_id_must_be_dni_or_ruc(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) not in {8, 11} or not normalized.isdigit():
+            raise ValueError("El documento debe ser un DNI de 8 dígitos o RUC de 11 dígitos")
+        return normalized
+
+
 class SaleCreate(BaseModel):
     number: str = Field(min_length=1, max_length=40)
-    customer_id: UUID
+    customer_id: UUID | None = None
+    customer: SaleCustomerCreate | None = None
     warehouse_id: UUID
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
@@ -29,6 +45,8 @@ class SaleCreate(BaseModel):
     def unique_products(self):
         if len({line.product_id for line in self.lines}) != len(self.lines):
             raise ValueError("Un producto solo puede aparecer una vez")
+        if (self.customer_id is None) == (self.customer is None):
+            raise ValueError("Selecciona un cliente existente o registra un cliente con DNI/RUC")
         return self
 
 
