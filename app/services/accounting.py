@@ -10,6 +10,7 @@ DEFAULT_ACCOUNTS = (
     ("1210", "Cuentas por cobrar comerciales", "asset"),
     ("2010", "Inventarios", "asset"),
     ("4010", "IGV por pagar", "liability"),
+    ("4011", "IGV crédito fiscal", "asset"),
     ("4210", "Cuentas por pagar comerciales", "liability"),
     ("7010", "Ventas", "income"),
 )
@@ -53,3 +54,22 @@ def post_entry(
 def split_tax(total: Decimal) -> tuple[Decimal, Decimal]:
     net = (total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return net, total - net
+
+
+def reverse_entry(
+    db: Session, *, tenant_id: UUID, actor_id: UUID, number: str, description: str,
+    original_source_type: str, original_source_id: UUID, reversal_source_type: str,
+) -> None:
+    """Post an auditable, balanced reversal instead of editing a posted entry."""
+    original = db.execute(text("""
+        select id from journal_entries where tenant_id=:tenant and source_type=:type and source_id=:source and status='posted'
+    """), {"tenant": str(tenant_id), "type": original_source_type, "source": str(original_source_id)}).scalar()
+    if not original:
+        return
+    lines = db.execute(text("""select a.code, l.debit, l.credit from journal_lines l
+        join chart_of_accounts a on a.id=l.account_id where l.journal_entry_id=:entry order by l.id"""), {"entry": str(original)}).mappings().all()
+    post_entry(
+        db, tenant_id=tenant_id, actor_id=actor_id, number=number, description=description,
+        source_type=reversal_source_type, source_id=original_source_id,
+        lines=[(line["code"], Decimal(str(line["credit"])), Decimal(str(line["debit"]))) for line in lines],
+    )

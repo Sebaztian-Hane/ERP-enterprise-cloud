@@ -155,10 +155,12 @@ def create_count(data: CountIn, actor: Actor = Depends(require_permission("inven
                "reason": data.reason, "note": data.note, "actor": str(actor.user_id)}).mappings().one()
         for line in data.lines:
             expected = db.execute(text("select coalesce(quantity,0) from inventories where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse"), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or 0
-            db.execute(text("""
+            inserted = db.execute(text("""
                 insert into inventory_count_lines(tenant_id,inventory_count_id,product_id,expected_quantity,counted_quantity,note)
                 select :tenant,:count,:product,:expected,:counted,:note where exists(select 1 from products where id=:product and tenant_id=:tenant and is_active=true)
             """), {"tenant": str(actor.tenant_id), "count": str(count["id"]), "product": str(line.product_id), "expected": expected, "counted": line.counted_quantity, "note": line.note})
+            if inserted.rowcount != 1:
+                raise HTTPException(status_code=404, detail="Uno de los productos del conteo no pertenece a la empresa activa")
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="inventory", entity="inventory_count", entity_id=count["id"], detail=data.reason)
         db.commit()
     except Exception as exc:
@@ -194,6 +196,10 @@ def apply_count(count_id: UUID, actor: Actor = Depends(require_permission("inven
     lines = db.execute(text("select * from inventory_count_lines where inventory_count_id=:id and tenant_id=:tenant"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().all()
     for line in lines:
         variance = Decimal(str(line["counted_quantity"])) - Decimal(str(line["expected_quantity"]))
+        reserved = db.execute(text("""select coalesce(sum(quantity),0) from stock_reservations
+            where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'"""), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]), "warehouse": str(count["warehouse_id"])}).scalar() or Decimal("0")
+        if Decimal(str(line["counted_quantity"])) < Decimal(str(reserved)):
+            raise HTTPException(status_code=422, detail="No se puede aplicar el conteo: la existencia física quedaría por debajo del stock reservado")
         if variance:
             db.execute(text("""
                 insert into inventories(tenant_id,product_id,warehouse_id,quantity) values(:tenant,:product,:warehouse,:quantity)
@@ -231,7 +237,8 @@ def list_approvals(actor: Actor = Depends(require_permission("approvals:read")),
 @router.post("/approvals/{request_id}/approve")
 def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
-      from approval_policies p where r.id=:id and r.tenant_id=:tenant and r.status='pending' and (p.id is null or p.required_role=:role or :role in ('owner','admin')) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
+      from approval_policies p where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.policy_id=p.id
+      and (p.required_role=:role or :role in ('owner','admin')) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)

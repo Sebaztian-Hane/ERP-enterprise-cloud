@@ -10,7 +10,7 @@ from app.schemas.transactions import CancelTransaction, PurchaseCreate, Purchase
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
-from app.services.accounting import post_entry, split_tax
+from app.services.accounting import post_entry, reverse_entry, split_tax
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -59,7 +59,7 @@ def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permis
             change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=line.quantity, movement_type="receipt", reference=data.number)
         tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else split_tax(total)[1]
         net = total - tax
-        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4010", tax, Decimal("0")), ("4210", Decimal("0"), total)])
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         db.commit()
     except IntegrityError as exc:
@@ -83,6 +83,7 @@ def cancel_purchase(purchase_id: str, data: CancelTransaction, actor: Actor = De
             change_stock(db, tenant_id=actor.tenant_id, product_id=item.product_id, warehouse_id=purchase.warehouse_id, quantity=-item.quantity, movement_type="issue", reference=f"CANCEL-{purchase.number}")
         purchase.status = "cancelled"
         account.status = "cancelled"
+        reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{purchase.number}", description=f"Reversión de compra {purchase.number}", original_source_type="purchase", original_source_id=purchase.id, reversal_source_type="purchase_cancel")
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="cancel", module="purchases", entity="purchase", entity_id=purchase.id)
         db.commit()
     except HTTPException:

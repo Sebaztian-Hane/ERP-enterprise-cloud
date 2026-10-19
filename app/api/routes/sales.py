@@ -14,7 +14,7 @@ from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
 from app.services.stock import change_stock
 from app.services.decolecta import DecolectaError, lookup_tax_id
-from app.services.accounting import post_entry, split_tax
+from app.services.accounting import post_entry, reverse_entry, split_tax
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -216,6 +216,7 @@ def cancel_sale(sale_id: str, data: CancelTransaction, actor: Actor = Depends(re
         change_stock(db, tenant_id=actor.tenant_id, product_id=item.product_id, warehouse_id=sale.warehouse_id, quantity=item.quantity, movement_type="receipt", reference=f"CANCEL-{sale.number}")
     sale.status = "cancelled"
     account.status = "cancelled"
+    reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{sale.number}", description=f"Reversión de venta {sale.number}", original_source_type="sale", original_source_id=sale.id, reversal_source_type="sale_cancel")
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="cancel", module="sales", entity="sale", entity_id=sale.id)
     db.commit()
     db.refresh(sale)
