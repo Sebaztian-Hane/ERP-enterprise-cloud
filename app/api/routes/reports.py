@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Customer, Inventory, Payment, Product, Purchase, Sale
 from app.security.auth import Actor, require_permission
+from app.core.config import get_settings
+from app.services.business_insights import generate_business_insight
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -41,6 +43,18 @@ class ActivityPointOut(BaseModel):
     purchases_total: Decimal
     receipts_total: Decimal
     payments_total: Decimal
+
+
+class InsightOut(BaseModel):
+    status: str
+    message: str | None = None
+    headline: str | None = None
+    summary: str | None = None
+    recommendation: str | None = None
+    severity: str | None = None
+    operation_count: int | None = None
+    minimum_operations: int | None = None
+    cached: bool | None = None
 
 
 def period_bounds(start_date: date, end_date: date):
@@ -138,6 +152,28 @@ def report_activity(
     db: Session = Depends(get_db),
 ):
     return activity_for_period(db, actor.tenant_id, start_date, end_date)
+
+
+@router.get("/insight", response_model=InsightOut)
+def report_insight(
+    start_date: date = Query(...), end_date: date = Query(...),
+    actor: Actor = Depends(require_permission("reports:read")), db: Session = Depends(get_db),
+):
+    current = totals_for_period(db, actor.tenant_id, start_date, end_date)
+    start, end = period_bounds(start_date, end_date)
+    window = lambda model: (model.tenant_id == actor.tenant_id, model.created_at >= start, model.created_at < end)
+    count = lambda model, *criteria: int(db.scalar(select(func.count(model.id)).where(*window(model), *criteria)) or 0)
+    operation_count = count(Sale, Sale.status == "posted") + count(Purchase, Purchase.status == "received") + count(Payment)
+    from sqlalchemy import text
+    receivable_total = db.scalar(text("select coalesce(sum(balance_amount), 0) from accounts_receivable where tenant_id=:t and status in ('open','partial')"), {"t": str(actor.tenant_id)}) or Decimal("0")
+    payable_total = db.scalar(text("select coalesce(sum(balance_amount), 0) from accounts_payable where tenant_id=:t and status in ('open','partial')"), {"t": str(actor.tenant_id)}) or Decimal("0")
+    low_stock_count = len(low_stock(actor, db))
+    return generate_business_insight(
+        settings=get_settings(), tenant_id=actor.tenant_id, start_date=str(start_date), end_date=str(end_date),
+        operation_count=operation_count, sales_total=current.sales_total, purchases_total=current.purchases_total,
+        receipts_total=current.receipts_total, payments_total=current.payments_total,
+        receivable_total=Decimal(receivable_total), payable_total=Decimal(payable_total), low_stock_count=low_stock_count,
+    )
 
 @router.get("/receivables")
 def receivables(actor: Actor = Depends(require_permission("reports:read")), db: Session = Depends(get_db)):

@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # DeColecta is used only to prefill customer data from DNI/RUC during sales.
     decolecta_base_url: AnyHttpUrl = "https://api.decolecta.com"
     decolecta_api_key: str | None = Field(default=None, repr=False)
+    # Gemini is used only by the automatic, aggregated business insight.
+    # It is a Render secret and never reaches the client.
+    gemini_api_key: str | None = Field(default=None, repr=False)
+    gemini_insight_model: str = "gemini-2.5-flash"
+    insight_min_operations: int = 4
+    insight_refresh_min_operations: int = 3
+    insight_cache_hours: int = 12
 
     @property
     def cors_origin_list(self) -> list[str]:
