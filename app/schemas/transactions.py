@@ -1,3 +1,4 @@
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -60,6 +61,11 @@ class PurchaseCreate(BaseModel):
     warehouse_id: UUID
     lines: list[PurchaseLineCreate] = Field(min_length=1)
     note: str | None = None
+    supplier_document_type: str | None = Field(default=None, max_length=8)
+    supplier_document_series: str | None = Field(default=None, max_length=8)
+    supplier_document_number: str | None = Field(default=None, max_length=16)
+    supplier_document_date: date | None = None
+    supplier_tax_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
 
     @model_validator(mode="after")
     def unique_products(self):
@@ -76,6 +82,11 @@ class PurchaseOut(ORMModel):
     status: str
     total: Decimal
     note: str | None
+    supplier_document_type: str | None
+    supplier_document_series: str | None
+    supplier_document_number: str | None
+    supplier_document_date: datetime | None
+    supplier_tax_amount: Decimal | None
 
 
 class CancelTransaction(BaseModel):

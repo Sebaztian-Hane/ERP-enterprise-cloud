@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     rag_sync_webhook_secret: str | None = Field(default=None, repr=False)
     rag_chat_webhook_url: AnyHttpUrl | None = None
     rag_chat_webhook_secret: str | None = Field(default=None, repr=False)
+    # APISUNAT stays entirely server-side. The development token is a Render
+    # secret and is never exposed through the browser or persisted in SQL.
+    apisunat_base_url: AnyHttpUrl = "https://back.apisunat.com"
+    apisunat_persona_id: str | None = None
+    apisunat_persona_token: str | None = Field(default=None, repr=False)
+    apisunat_issuer_ruc: str | None = None
+    apisunat_issuer_trade_name: str | None = None
+    apisunat_issuer_legal_name: str | None = None
+    apisunat_issuer_address: str | None = None
+    apisunat_invoice_series: str = "F001"
+    apisunat_receipt_series: str = "B001"
 
     @property
     def cors_origin_list(self) -> list[str]:

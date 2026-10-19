@@ -1,13 +1,17 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import AccountReceivable, Customer, Product, Sale, SaleItem, Warehouse
+from app.core.config import get_settings
+from app.models.entities import AccountReceivable, Customer, ElectronicDocument, Product, Sale, SaleItem, Warehouse
+from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, SaleCreate, SaleOut
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
 from app.services.stock import change_stock
 
 router = APIRouter(prefix="/sales", tags=["sales"])
@@ -25,6 +29,106 @@ def list_sale_warehouses(actor: Actor = Depends(require_permission("sales:read")
 @router.get("", response_model=list[SaleOut])
 def list_sales(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
     return db.scalars(select(Sale).where(Sale.tenant_id == actor.tenant_id).order_by(Sale.created_at.desc())).all()
+
+
+def _electronic_document(sale_id: str, actor: Actor, db: Session) -> tuple[Sale, ElectronicDocument | None]:
+    sale = db.scalar(select(Sale).where(Sale.id == sale_id, Sale.tenant_id == actor.tenant_id))
+    if not sale:
+        raise HTTPException(status_code=404, detail="La venta no existe")
+    document = db.scalar(select(ElectronicDocument).where(ElectronicDocument.sale_id == sale.id, ElectronicDocument.tenant_id == actor.tenant_id))
+    return sale, document
+
+
+def _provider_status(value: object) -> str:
+    mapping = {"PENDIENTE": "pending", "ACEPTADO": "accepted", "RECHAZADO": "rejected", "EXCEPCION": "exception"}
+    return mapping.get(str(value).upper(), "error")
+
+
+@router.get("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut | None)
+def get_electronic_document(sale_id: str, actor: Actor = Depends(require_permission("electronic_billing:read")), db: Session = Depends(get_db)):
+    _, document = _electronic_document(sale_id, actor, db)
+    return document
+
+
+@router.post("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut, status_code=status.HTTP_201_CREATED)
+def issue_electronic_document(sale_id: str, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+    sale, existing = _electronic_document(sale_id, actor, db)
+    if sale.status != "posted":
+        raise HTTPException(status_code=409, detail="Solo se pueden emitir comprobantes de ventas procesadas")
+    if existing:
+        raise HTTPException(status_code=409, detail="Esta venta ya tiene un comprobante electrónico")
+    customer = db.scalar(select(Customer).where(Customer.id == sale.customer_id, Customer.tenant_id == actor.tenant_id))
+    items = db.execute(select(SaleItem, Product).join(Product, Product.id == SaleItem.product_id).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
+    if not customer or not items:
+        raise HTTPException(status_code=409, detail="La venta no tiene cliente o líneas válidas para facturar")
+    tax_id = (customer.tax_id or "").strip()
+    if data.document_type == "01" and len(tax_id) != 11:
+        raise HTTPException(status_code=422, detail="Para emitir Factura el cliente debe tener un RUC de 11 dígitos")
+    if data.document_type == "03" and len(tax_id) not in {8, 11}:
+        raise HTTPException(status_code=422, detail="Para emitir Boleta el cliente debe tener DNI de 8 dígitos o RUC de 11 dígitos")
+    settings = get_settings()
+    series = settings.apisunat_invoice_series if data.document_type == "01" else settings.apisunat_receipt_series
+    try:
+        correlative = next_correlative(settings, data.document_type, series)
+        now = datetime.now(timezone.utc)
+        issue_date, issue_time = now.date().isoformat(), now.strftime("%H:%M:%S")
+        body = build_document_body(
+            sale_number=sale.number, issue_date=issue_date, issue_time=issue_time, document_type=data.document_type, series=series, correlative=correlative,
+            issuer={"ruc": settings.apisunat_issuer_ruc or "", "trade_name": settings.apisunat_issuer_trade_name or "", "legal_name": settings.apisunat_issuer_legal_name or "", "address": settings.apisunat_issuer_address or ""},
+            customer={"tax_id": tax_id, "name": customer.name, "address": ""},
+            lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit, "description": product.name} for item, product in items],
+            total=sale.total,
+        )
+        file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
+        response = send_bill(settings, {"personaId": settings.apisunat_persona_id, "personaToken": settings.apisunat_persona_token, "fileName": file_name, "documentBody": body, **({"customerEmail": customer.email} if customer.email else {})})
+    except APISunatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"))
+    document = ElectronicDocument(tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type, series=series, correlative=correlative, file_name=file_name, status=_provider_status(response.get("status")), provider_document_id=response.get("documentId"), taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total, provider_payload=response)
+    db.add(document)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="issue", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=f"{file_name} · {response.get('status', 'PENDIENTE')}")
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.post("/{sale_id}/electronic-document/refresh", response_model=ElectronicDocumentOut)
+def refresh_electronic_document(sale_id: str, actor: Actor = Depends(require_permission("electronic_billing:read")), db: Session = Depends(get_db)):
+    _, document = _electronic_document(sale_id, actor, db)
+    if not document or not document.provider_document_id:
+        raise HTTPException(status_code=404, detail="La venta no tiene un comprobante electrónico emitido")
+    try:
+        response = get_document(get_settings(), document.provider_document_id)
+    except APISunatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    document.status = _provider_status(response.get("status"))
+    document.xml_url = response.get("xml") if isinstance(response.get("xml"), str) else document.xml_url
+    document.cdr_url = response.get("cdr") if isinstance(response.get("cdr"), str) else document.cdr_url
+    document.provider_payload = response
+    document.last_error = None if document.status in {"pending", "accepted"} else str(response.get("faults") or response.get("notes") or "APISUNAT reportó observaciones")
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="refresh", module="electronic_billing", entity="electronic_document", entity_id=document.id)
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@router.post("/{sale_id}/electronic-document/void", response_model=ElectronicDocumentOut)
+def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+    _, document = _electronic_document(sale_id, actor, db)
+    if not document or not document.provider_document_id:
+        raise HTTPException(status_code=404, detail="La venta no tiene un comprobante electrónico emitido")
+    if document.status in {"void_pending", "voided"}:
+        raise HTTPException(status_code=409, detail="El comprobante ya está en proceso de anulación o anulado")
+    try:
+        response = void_bill(get_settings(), document.provider_document_id, data.reason)
+    except APISunatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    document.status = "void_pending"
+    document.provider_payload = response
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="void", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=data.reason)
+    db.commit()
+    db.refresh(document)
+    return document
 
 
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)

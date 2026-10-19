@@ -1,3 +1,4 @@
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -36,7 +37,13 @@ def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permis
     if not supplier or not warehouse or products != product_ids:
         raise HTTPException(status_code=404, detail="Proveedor, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_cost for line in data.lines), Decimal("0"))
-    purchase = Purchase(tenant_id=actor.tenant_id, number=data.number, supplier_id=data.supplier_id, warehouse_id=data.warehouse_id, status="received", total=total, note=data.note)
+    purchase = Purchase(
+        tenant_id=actor.tenant_id, number=data.number, supplier_id=data.supplier_id, warehouse_id=data.warehouse_id,
+        status="received", total=total, note=data.note, supplier_document_type=data.supplier_document_type,
+        supplier_document_series=data.supplier_document_series, supplier_document_number=data.supplier_document_number,
+        supplier_document_date=datetime.combine(data.supplier_document_date, time.min, tzinfo=timezone.utc) if data.supplier_document_date else None,
+        supplier_tax_amount=data.supplier_tax_amount,
+    )
     db.add(purchase)
     try:
         db.flush()

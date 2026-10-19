@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
@@ -148,6 +148,11 @@ class Purchase(TimestampedTenantModel):
     status: Mapped[str] = mapped_column(String(24), default="received", nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
+    supplier_document_type: Mapped[str | None] = mapped_column(String(8))
+    supplier_document_series: Mapped[str | None] = mapped_column(String(8))
+    supplier_document_number: Mapped[str | None] = mapped_column(String(16))
+    supplier_document_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supplier_tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
 
 
 class PurchaseItem(Base):
@@ -160,6 +165,33 @@ class PurchaseItem(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+
+
+class ElectronicDocument(TimestampedTenantModel):
+    """An APISUNAT CPE generated from one posted sale."""
+
+    __tablename__ = "electronic_documents"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "sale_id"),
+        UniqueConstraint("tenant_id", "file_name"),
+        Index("ix_electronic_documents_tenant_status", "tenant_id", "status"),
+    )
+
+    sale_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sales.id"), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    series: Mapped[str] = mapped_column(String(8), nullable=False)
+    correlative: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="draft", nullable=False)
+    provider_document_id: Mapped[str | None] = mapped_column(String(80))
+    taxable_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="PEN", nullable=False)
+    xml_url: Mapped[str | None] = mapped_column(Text)
+    cdr_url: Mapped[str | None] = mapped_column(Text)
+    provider_payload: Mapped[dict | None] = mapped_column(JSONB)
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class Payment(TimestampedTenantModel):
