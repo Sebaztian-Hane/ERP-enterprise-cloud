@@ -13,6 +13,7 @@ from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
 from app.services.stock import change_stock
+from app.services.decolecta import DecolectaError, lookup_tax_id
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -29,6 +30,19 @@ def list_sale_warehouses(actor: Actor = Depends(require_permission("sales:read")
 @router.get("", response_model=list[SaleOut])
 def list_sales(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
     return db.scalars(select(Sale).where(Sale.tenant_id == actor.tenant_id).order_by(Sale.created_at.desc())).all()
+
+
+@router.get("/customer-lookup/{tax_id}")
+def lookup_sale_customer(tax_id: str, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+    """Return an existing ERP customer first, otherwise authoritative DNI/RUC data."""
+    normalized = tax_id.strip()
+    existing = db.scalar(select(Customer).where(Customer.tenant_id == actor.tenant_id, Customer.tax_id == normalized, Customer.is_active.is_(True)))
+    if existing:
+        return {"existing_customer_id": str(existing.id), "tax_id": normalized, "name": existing.name, "address": "", "document_type": "DNI" if len(normalized) == 8 else "RUC"}
+    try:
+        return {"existing_customer_id": None, **lookup_tax_id(get_settings(), normalized)}
+    except DecolectaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _electronic_document(sale_id: str, actor: Actor, db: Session) -> tuple[Sale, ElectronicDocument | None]:

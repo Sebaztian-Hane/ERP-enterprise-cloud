@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     apisunat_issuer_address: str | None = None
     apisunat_invoice_series: str = "F001"
     apisunat_receipt_series: str = "B001"
+    # DeColecta is used only to prefill customer data from DNI/RUC during sales.
+    decolecta_base_url: AnyHttpUrl = "https://api.decolecta.com"
+    decolecta_api_key: str | None = Field(default=None, repr=False)
 
     @property
     def cors_origin_list(self) -> list[str]:
