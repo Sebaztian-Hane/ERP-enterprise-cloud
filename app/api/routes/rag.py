@@ -5,6 +5,7 @@ The browser never receives the RAG integration credential nor calls n8n directly
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -27,6 +28,11 @@ from app.services.rag_sync import (
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 MAX_CONVERSATIONS_PER_MEMBER = 5
+# A retrieval call can involve the vector database, Gemini embeddings and the
+# chat model.  Thirty-five seconds was short enough to abort healthy cold
+# starts while the workflow was still composing its response.
+RAG_CHAT_READ_TIMEOUT_SECONDS = 90
+logger = logging.getLogger(__name__)
 
 
 @router.get("/tenants", dependencies=[Depends(require_rag_integration_key)])
@@ -226,7 +232,14 @@ def chat_with_rag(
     }
     try:
         body, headers = signed_request(event, settings.rag_chat_webhook_secret)
-        with httpx.Client(timeout=35) as client:
+        with httpx.Client(
+            timeout=httpx.Timeout(
+                connect=10,
+                read=RAG_CHAT_READ_TIMEOUT_SECONDS,
+                write=15,
+                pool=10,
+            )
+        ) as client:
             response = client.post(
                 str(settings.rag_chat_webhook_url),
                 content=body,
@@ -234,10 +247,27 @@ def chat_with_rag(
             )
             response.raise_for_status()
     except httpx.TimeoutException as exc:
+        logger.warning(
+            "rag_chat_timeout tenant_id=%s conversation_id=%s",
+            actor.tenant_id,
+            conversation.id,
+        )
         raise HTTPException(status_code=504, detail="El asistente tardó demasiado en responder") from exc
     except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "rag_chat_webhook_error status=%s tenant_id=%s conversation_id=%s",
+            exc.response.status_code,
+            actor.tenant_id,
+            conversation.id,
+        )
         raise HTTPException(status_code=502, detail="El asistente no pudo procesar la consulta") from exc
     except httpx.HTTPError as exc:
+        logger.warning(
+            "rag_chat_connection_error tenant_id=%s conversation_id=%s error=%s",
+            actor.tenant_id,
+            conversation.id,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=502, detail="No se pudo conectar con el asistente") from exc
     try:
         result = response.json()
