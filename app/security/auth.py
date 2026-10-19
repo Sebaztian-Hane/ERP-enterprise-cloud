@@ -74,9 +74,9 @@ def get_user_id(authorization: str = Header(...)) -> UUID:
 ROLE_PERMISSIONS = {
     "owner": {"*"}, "admin": {"*"}, "sales": {"customers:read", "customers:write", "products:read", "sales:read", "sales:write", "documents:read", "documents:write"},
     "purchases": {"suppliers:read", "suppliers:write", "products:read", "purchases:read", "purchases:write"},
-    "finance": {"payments:read", "payments:write", "accounts:read", "sales:read", "purchases:read", "reports:read", "documents:read", "documents:write", "treasury:read", "treasury:write"},
+    "finance": {"payments:read", "payments:write", "accounts:read", "sales:read", "purchases:read", "reports:read", "documents:read", "documents:write", "treasury:read", "treasury:write", "accounting:read", "accounting:write", "approvals:read"},
     "inventory": {"products:read", "products:write", "inventory:read", "inventory:write"},
-    "viewer": {"customers:read", "products:read", "suppliers:read", "inventory:read", "sales:read", "purchases:read", "payments:read", "accounts:read", "reports:read", "documents:read"},
+    "viewer": {"customers:read", "products:read", "suppliers:read", "inventory:read", "sales:read", "purchases:read", "payments:read", "accounts:read", "reports:read", "documents:read", "accounting:read"},
 }
 
 

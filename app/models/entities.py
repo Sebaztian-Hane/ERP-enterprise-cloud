@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -75,6 +75,9 @@ class Product(TimestampedTenantModel):
     category_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("categories.id"))
     unit: Mapped[str] = mapped_column(String(16), default="unit", nullable=False)
     sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
+    tracking_mode: Mapped[str] = mapped_column(String(12), default="none", nullable=False)
+    cost_method: Mapped[str] = mapped_column(String(20), default="weighted_average", nullable=False)
+    average_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -230,6 +233,7 @@ class AccountReceivable(TimestampedTenantModel):
     original_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     balance_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)
+    due_date: Mapped[date] = mapped_column(nullable=False)
 
 
 class AccountPayable(TimestampedTenantModel):
@@ -240,6 +244,7 @@ class AccountPayable(TimestampedTenantModel):
     original_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     balance_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="open", nullable=False)
+    due_date: Mapped[date] = mapped_column(nullable=False)
 
 
 class PaymentAllocation(Base):

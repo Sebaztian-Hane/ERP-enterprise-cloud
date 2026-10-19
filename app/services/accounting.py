@@ -1,0 +1,55 @@
+from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
+from uuid import UUID
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+
+DEFAULT_ACCOUNTS = (
+    ("1010", "Caja y bancos", "asset"),
+    ("1210", "Cuentas por cobrar comerciales", "asset"),
+    ("2010", "Inventarios", "asset"),
+    ("4010", "IGV por pagar", "liability"),
+    ("4210", "Cuentas por pagar comerciales", "liability"),
+    ("7010", "Ventas", "income"),
+)
+
+
+def ensure_default_chart(db: Session, tenant_id: UUID) -> None:
+    for code, name, account_type in DEFAULT_ACCOUNTS:
+        db.execute(text("""
+            insert into chart_of_accounts(tenant_id, code, name, account_type)
+            values(:tenant, :code, :name, :account_type)
+            on conflict(tenant_id, code) do nothing
+        """), {"tenant": str(tenant_id), "code": code, "name": name, "account_type": account_type})
+
+
+def post_entry(
+    db: Session, *, tenant_id: UUID, actor_id: UUID, number: str, description: str,
+    source_type: str, source_id: UUID, lines: list[tuple[str, Decimal, Decimal]], entry_date: date | None = None,
+) -> None:
+    """Create one immutable balanced entry. Duplicate source records are idempotent."""
+    debit = sum((line[1] for line in lines), Decimal("0"))
+    credit = sum((line[2] for line in lines), Decimal("0"))
+    if debit.quantize(Decimal("0.01")) != credit.quantize(Decimal("0.01")):
+        raise ValueError("El asiento no está balanceado")
+    ensure_default_chart(db, tenant_id)
+    entry_id = db.execute(text("""
+        insert into journal_entries(tenant_id, number, entry_date, description, source_type, source_id, created_by)
+        values(:tenant, :number, :entry_date, :description, :source_type, :source_id, :actor)
+        on conflict(tenant_id, source_type, source_id) do nothing returning id
+    """), {"tenant": str(tenant_id), "number": number, "entry_date": entry_date or date.today(), "description": description,
+           "source_type": source_type, "source_id": str(source_id), "actor": str(actor_id)}).scalar()
+    if not entry_id:
+        return
+    for code, line_debit, line_credit in lines:
+        account_id = db.execute(text("select id from chart_of_accounts where tenant_id=:tenant and code=:code"), {"tenant": str(tenant_id), "code": code}).scalar_one()
+        db.execute(text("""
+            insert into journal_lines(tenant_id, journal_entry_id, account_id, debit, credit)
+            values(:tenant, :entry, :account, :debit, :credit)
+        """), {"tenant": str(tenant_id), "entry": str(entry_id), "account": str(account_id), "debit": line_debit, "credit": line_credit})
+
+
+def split_tax(total: Decimal) -> tuple[Decimal, Decimal]:
+    net = (total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return net, total - net

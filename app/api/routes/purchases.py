@@ -10,6 +10,7 @@ from app.schemas.transactions import CancelTransaction, PurchaseCreate, Purchase
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
+from app.services.accounting import post_entry, split_tax
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -47,10 +48,18 @@ def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permis
     db.add(purchase)
     try:
         db.flush()
-        db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=data.supplier_id, original_amount=total, balance_amount=total, status="open"))
+        db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=data.supplier_id, original_amount=total, balance_amount=total, status="open", due_date=data.due_date or datetime.now(timezone.utc).date()))
         for line in data.lines:
             db.add(PurchaseItem(tenant_id=actor.tenant_id, purchase_id=purchase.id, product_id=line.product_id, quantity=line.quantity, unit_cost=line.unit_cost, line_total=line.quantity * line.unit_cost))
+            stock_before = db.execute(__import__("sqlalchemy").text("select coalesce(quantity,0) from inventories where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse for update"), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or Decimal("0")
+            product_cost = db.scalar(select(Product).where(Product.id == line.product_id, Product.tenant_id == actor.tenant_id).with_for_update())
+            if product_cost and product_cost.cost_method == "weighted_average":
+                base_value = stock_before * product_cost.average_cost
+                product_cost.average_cost = ((base_value + line.quantity * line.unit_cost) / (stock_before + line.quantity)).quantize(Decimal("0.01"))
             change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=line.quantity, movement_type="receipt", reference=data.number)
+        tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else split_tax(total)[1]
+        net = total - tax
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4010", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         db.commit()
     except IntegrityError as exc:

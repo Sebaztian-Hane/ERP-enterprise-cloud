@@ -8,6 +8,7 @@ from app.models.entities import AccountPayable, AccountReceivable, Customer, Pay
 from app.schemas.payments import PaymentCreate, PaymentOut
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.services.accounting import post_entry
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -73,6 +74,7 @@ def create_payment(request: Request, response: Response, data: PaymentCreate, ac
                 db.add(PaymentAllocation(tenant_id=actor.tenant_id, payment_id=payment.id, payable_id=account.id, amount=allocation.amount))
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="payments", entity="payment", entity_id=payment.id)
         db.execute(__import__("sqlalchemy").text("insert into cash_movements(tenant_id,cash_account_id,payment_id,movement_type,amount,reference) values(:tenant,:account,:payment,:type,:amount,:reference)"), {"tenant":str(actor.tenant_id),"account":str(data.cash_account_id),"payment":str(payment.id),"type":"inflow" if data.payment_type=="receipt" else "outflow","amount":data.amount,"reference":data.number})
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"{'Cobro' if data.payment_type == 'receipt' else 'Pago'} {data.number}", source_type="payment", source_id=payment.id, lines=[("1010", data.amount if data.payment_type == "receipt" else Decimal("0"), data.amount if data.payment_type == "payment" else Decimal("0")), ("1210" if data.payment_type == "receipt" else "4210", Decimal("0") if data.payment_type == "receipt" else data.amount, data.amount if data.payment_type == "receipt" else Decimal("0"))])
         db.commit()
     except HTTPException:
         db.rollback()

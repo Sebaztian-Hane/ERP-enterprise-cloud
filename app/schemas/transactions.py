@@ -40,6 +40,7 @@ class SaleCreate(BaseModel):
     warehouse_id: UUID
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
+    due_date: date | None = None
 
     @model_validator(mode="after")
     def unique_products(self):
@@ -84,6 +85,7 @@ class PurchaseCreate(BaseModel):
     supplier_document_number: str | None = Field(default=None, max_length=16)
     supplier_document_date: date | None = None
     supplier_tax_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+    due_date: date | None = None
 
     @model_validator(mode="after")
     def unique_products(self):

@@ -14,6 +14,7 @@ from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
 from app.services.stock import change_stock
 from app.services.decolecta import DecolectaError, lookup_tax_id
+from app.services.accounting import post_entry, split_tax
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -181,10 +182,12 @@ def post_sale(data: SaleCreate, actor: Actor = Depends(require_permission("sales
     db.add(sale)
     try:
         db.flush()
-        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open"))
+        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open", due_date=data.due_date or datetime.now(timezone.utc).date()))
         for line in data.lines:
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=line.quantity * line.unit_price))
             change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=-line.quantity, movement_type="issue", reference=data.number)
+        net, tax = split_tax(total)
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Venta {data.number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
         db.commit()
     except IntegrityError as exc:
