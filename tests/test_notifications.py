@@ -4,6 +4,8 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes import notifications
+from app.api.routes.payments import _same_payment_request
+from app.schemas.payments import PaymentCreate
 from app.security.auth import Actor
 
 
@@ -49,3 +51,22 @@ def test_marking_known_notification_scopes_state_to_the_current_member(monkeypat
     assert db.executions[0][1] == {
         "tenant": str(actor.tenant_id), "user": str(actor.user_id), "notification_id": alert.id,
     }
+
+
+def test_payment_retry_must_match_the_original_financial_data():
+    account_id, customer_id = uuid4(), uuid4()
+    data = PaymentCreate(
+        number="COB-001", payment_type="receipt", amount="25.00", method="transferencia",
+        cash_account_id=account_id, customer_id=customer_id,
+        allocations=[{"receivable_id": str(uuid4()), "amount": "25.00"}],
+    )
+
+    class Existing:
+        payment_type = "receipt"; amount = data.amount; method = "transferencia"
+        cash_account_id = account_id; supplier_id = None; reference = None; note = None
+
+    Existing.customer_id = customer_id
+
+    assert _same_payment_request(Existing(), data)
+    Existing.amount = data.amount + 1
+    assert not _same_payment_request(Existing(), data)

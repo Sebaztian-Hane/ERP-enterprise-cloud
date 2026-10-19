@@ -12,6 +12,20 @@ from app.services.audit import record
 router = APIRouter(prefix="/payments", tags=["payments"])
 
 
+def _same_payment_request(existing: Payment, data: PaymentCreate) -> bool:
+    """Recognize a retried financial request without accepting changed data."""
+    return (
+        existing.payment_type == data.payment_type
+        and existing.amount == data.amount
+        and existing.method == data.method
+        and existing.cash_account_id == data.cash_account_id
+        and existing.customer_id == data.customer_id
+        and existing.supplier_id == data.supplier_id
+        and existing.reference == data.reference
+        and existing.note == data.note
+    )
+
+
 @router.get("", response_model=list[PaymentOut])
 def list_payments(actor: Actor = Depends(require_permission("payments:read")), db: Session = Depends(get_db)):
     return db.scalars(select(Payment).where(Payment.tenant_id == actor.tenant_id).order_by(Payment.created_at.desc())).all()
@@ -20,6 +34,17 @@ def list_payments(actor: Actor = Depends(require_permission("payments:read")), d
 @router.post("", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("20/minute")
 def create_payment(request: Request, response: Response, data: PaymentCreate, actor: Actor = Depends(require_permission("payments:write")), db: Session = Depends(get_db)):
+    # A mobile connection can disappear after the database commits but before
+    # the browser receives the response.  The user-visible number is therefore
+    # an idempotency key for an otherwise identical retry.
+    existing = db.scalar(select(Payment).where(
+        Payment.tenant_id == actor.tenant_id,
+        Payment.number == data.number,
+    ))
+    if existing:
+        if _same_payment_request(existing, data):
+            return existing
+        raise HTTPException(status_code=409, detail="El número de cobro o pago ya existe con datos diferentes")
     if data.customer_id and not db.scalar(select(Customer.id).where(Customer.id == data.customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True))):
         raise HTTPException(status_code=404, detail="Cliente no encontrado en la empresa activa")
     if data.supplier_id and not db.scalar(select(Supplier.id).where(Supplier.id == data.supplier_id, Supplier.tenant_id == actor.tenant_id, Supplier.is_active.is_(True))):
