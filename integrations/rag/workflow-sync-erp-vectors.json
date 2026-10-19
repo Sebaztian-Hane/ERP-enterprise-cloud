@@ -144,20 +144,6 @@
         },
         {
             "parameters": {
-                "batchSize": 1,
-                "options": {}
-            },
-            "type": "n8n-nodes-base.splitInBatches",
-            "typeVersion": 3,
-            "position": [
-                1620,
-                300
-            ],
-            "id": "0c02e8ca-91b5-48d6-9574-29f34c002014",
-            "name": "Procesar un documento a la vez"
-        },
-        {
-            "parameters": {
                 "mode": "insert",
                 "tableName": {
                     "__rl": true,
@@ -343,30 +329,7 @@
             "main": [
                 [
                     {
-                        "node": "Procesar un documento a la vez",
-                        "type": "main",
-                        "index": 0
-                    }
-                ]
-            ]
-        },
-        "Procesar un documento a la vez": {
-            "main": [
-        [],
-        [
-          {
-            "node": "Supabase Vector Store",
-            "type": "main",
-            "index": 0
-          }
-        ]
-            ]
-        },
-        "Supabase Vector Store": {
-            "main": [
-                [
-                    {
-                        "node": "Procesar un documento a la vez",
+                        "node": "Supabase Vector Store",
                         "type": "main",
                         "index": 0
                     }
