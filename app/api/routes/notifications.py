@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ class NotificationOut(BaseModel):
     module: str
     entity_id: UUID | None = None
     created_at: datetime
+    is_read: bool = False
 
 
 def _can(actor: Actor, permission: str) -> bool:
@@ -34,8 +35,7 @@ def _money(value: Decimal) -> str:
     return f"S/ {value:,.2f}"
 
 
-@router.get("", response_model=list[NotificationOut])
-def list_notifications(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+def _current_alerts(actor: Actor, db: Session) -> list[NotificationOut]:
     """Return current, actionable alerts limited to modules the member can access.
 
     Alerts are deliberately calculated from the source records instead of copied into
@@ -132,3 +132,66 @@ def list_notifications(actor: Actor = Depends(get_actor), db: Session = Depends(
 
     rank = {"critical": 0, "warning": 1, "info": 2}
     return sorted(alerts, key=lambda alert: (rank[alert.severity], alert.title))
+
+
+def _read_notification_ids(actor: Actor, db: Session) -> set[str]:
+    return set(db.execute(
+        text("""
+            select notification_id from notification_read_states
+            where tenant_id = :tenant and user_id = :user
+        """),
+        {"tenant": str(actor.tenant_id), "user": str(actor.user_id)},
+    ).scalars())
+
+
+@router.get("", response_model=list[NotificationOut])
+def list_notifications(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+    """Return actionable alerts, preserving each member's read state."""
+    alerts = _current_alerts(actor, db)
+    read_ids = _read_notification_ids(actor, db)
+    for alert in alerts:
+        alert.is_read = alert.id in read_ids
+    return alerts
+
+
+def _mark_as_read(notification: NotificationOut, actor: Actor, db: Session) -> NotificationOut:
+    # Notifications are dynamic, so their identity is validated against the
+    # current source data before it is persisted as read.
+    db.execute(
+        text("""
+            insert into notification_read_states (tenant_id, user_id, notification_id)
+            values (:tenant, :user, :notification_id)
+            on conflict (tenant_id, user_id, notification_id)
+            do update set read_at = excluded.read_at
+        """),
+        {
+            "tenant": str(actor.tenant_id),
+            "user": str(actor.user_id),
+            "notification_id": notification.id,
+        },
+    )
+    notification.is_read = True
+    return notification
+
+
+@router.post("/read-all", response_model=list[NotificationOut])
+def mark_all_notifications_as_read(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+    alerts = _current_alerts(actor, db)
+    for alert in alerts:
+        _mark_as_read(alert, actor, db)
+    db.commit()
+    return alerts
+
+
+@router.post("/{notification_id}/read", response_model=NotificationOut)
+def mark_notification_as_read(notification_id: str, actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+    alerts = {alert.id: alert for alert in _current_alerts(actor, db)}
+    notification = alerts.get(notification_id)
+    if notification is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La notificación no existe o ya no requiere atención.",
+        )
+    _mark_as_read(notification, actor, db)
+    db.commit()
+    return notification
