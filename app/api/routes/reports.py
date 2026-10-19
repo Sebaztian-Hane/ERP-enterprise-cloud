@@ -35,6 +35,14 @@ class ReportSummaryOut(BaseModel):
     comparison: PeriodOut | None = None
 
 
+class ActivityPointOut(BaseModel):
+    date: date
+    sales_total: Decimal
+    purchases_total: Decimal
+    receipts_total: Decimal
+    payments_total: Decimal
+
+
 def period_bounds(start_date: date, end_date: date):
     if end_date < start_date:
         raise HTTPException(status_code=422, detail="La fecha final debe ser posterior a la fecha inicial")
@@ -56,6 +64,40 @@ def totals_for_period(db: Session, tenant, start_date: date, end_date: date) -> 
         receipts_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(*window(Payment), Payment.payment_type == "receipt")),
         payments_total=total(select(func.coalesce(func.sum(Payment.amount), 0)).where(*window(Payment), Payment.payment_type == "payment")),
     )
+
+
+def activity_for_period(db: Session, tenant, start_date: date, end_date: date) -> list[ActivityPointOut]:
+    """Return a gap-free daily activity series for charts and exports.
+
+    Aggregating in Python avoids database-specific date truncation functions and
+    makes the endpoint behave consistently in local SQLite and PostgreSQL.
+    """
+    start, end = period_bounds(start_date, end_date)
+    buckets = {
+        start_date + timedelta(days=offset): {
+            "sales_total": Decimal("0"), "purchases_total": Decimal("0"),
+            "receipts_total": Decimal("0"), "payments_total": Decimal("0"),
+        }
+        for offset in range((end_date - start_date).days + 1)
+    }
+
+    def add_rows(model, amount_field, target, *criteria):
+        rows = db.execute(
+            select(model.created_at, amount_field).where(
+                model.tenant_id == tenant, model.created_at >= start,
+                model.created_at < end, *criteria,
+            )
+        ).all()
+        for created_at, amount in rows:
+            day = created_at.date()
+            if day in buckets:
+                buckets[day][target] += Decimal(amount or 0)
+
+    add_rows(Sale, Sale.total, "sales_total", Sale.status == "posted")
+    add_rows(Purchase, Purchase.total, "purchases_total", Purchase.status == "received")
+    add_rows(Payment, Payment.amount, "receipts_total", Payment.payment_type == "receipt")
+    add_rows(Payment, Payment.amount, "payments_total", Payment.payment_type == "payment")
+    return [ActivityPointOut(date=day, **values) for day, values in buckets.items()]
 
 
 @router.get("/dashboard", response_model=DashboardOut)
@@ -86,6 +128,16 @@ def report_summary(
         raise HTTPException(status_code=422, detail="Indique ambas fechas para el comparativo")
     comparison = totals_for_period(db, actor.tenant_id, compare_start_date, compare_end_date) if compare_start_date and compare_end_date else None
     return ReportSummaryOut(current=totals_for_period(db, actor.tenant_id, start_date, end_date), comparison=comparison)
+
+
+@router.get("/activity", response_model=list[ActivityPointOut])
+def report_activity(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    actor: Actor = Depends(require_permission("reports:read")),
+    db: Session = Depends(get_db),
+):
+    return activity_for_period(db, actor.tenant_id, start_date, end_date)
 
 @router.get("/receivables")
 def receivables(actor: Actor = Depends(require_permission("reports:read")), db: Session = Depends(get_db)):
