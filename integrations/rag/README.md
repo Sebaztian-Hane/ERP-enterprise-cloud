@@ -18,7 +18,7 @@ ERP_RAG_WEBHOOK_SECRET=<secreto-aleatorio-distinto-de-32-o-mas-caracteres>
 SUPABASE_RAG_URL=https://<nuevo-proyecto>.supabase.co
 SUPABASE_RAG_SERVICE_ROLE_KEY=<service_role-del-nuevo-proyecto>
 GEMINI_API_KEY=<clave-de-Gemini>
-GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+GEMINI_EMBEDDING_MODEL=gemini-embedding-2
 DEEPSEEK_API_KEY=<clave-de-DeepSeek>
 DEEPSEEK_CHAT_MODEL=deepseek-chat
 NODE_FUNCTION_ALLOW_BUILTIN=crypto
@@ -42,6 +42,7 @@ RAG_CHAT_WEBHOOK_SECRET=<ERP_RAG_WEBHOOK_SECRET>
 - La API de exportación requiere `X-RAG-Integration-Key` y no incluye correos, RUC/DNI, contraseñas, archivos ni identidades de usuarios.
 - Cada documento vectorial contiene un `tenant_id`; la función de búsqueda lo exige como filtro, por lo que no hay búsqueda entre empresas.
 - El frontend no conoce ni la URL privada de n8n ni credenciales de Gemini, DeepSeek o Supabase. Usará `POST /api/v1/rag/chat`, autenticado con el JWT actual del ERP.
+- La memoria de conversación se guarda en `rag_chat_messages`, segregada por empresa, usuario y conversación. Se conservan solo los últimos diez mensajes como contexto.
 - Los cambios operativos generan un evento solo después del `commit`; el cron del workflow vuelve a indexar todas las empresas como recuperación ante caídas temporales.
 
 ## Primera carga y operación

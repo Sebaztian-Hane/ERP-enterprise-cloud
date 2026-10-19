@@ -34,7 +34,7 @@
       "id": "split-documents", "name": "Separar documentos", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [300, 120]
     },
     {
-      "parameters": {"method": "POST", "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + ($env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001') + ':embedContent?key=' + $env.GEMINI_API_KEY }}", "sendBody": true, "specifyBody": "json", "jsonBody": "={\"model\":\"models/{{ $env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001' }}\",\"content\":{\"parts\":[{\"text\":{{ JSON.stringify($json.content) }}]},\"outputDimensionality\":768}", "options": {"batching": {"batch": {"batchSize": 1, "batchInterval": 150}}}},
+      "parameters": {"method": "POST", "url": "={{ 'https://generativelanguage.googleapis.com/v1beta/models/' + ($env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-2') + ':embedContent?key=' + $env.GEMINI_API_KEY }}", "sendBody": true, "specifyBody": "json", "jsonBody": "={{ JSON.stringify({ content: { parts: [{ text: 'Documento operativo del ERP EnterpriseCloud para recuperación semántica: ' + $json.content }] }, output_dimensionality: 768 }) }}", "options": {"batching": {"batch": {"batchSize": 1, "batchInterval": 150}}}},
       "id": "gemini-embed", "name": "Embeddings Gemini", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [540, 120]
     },
     {

@@ -26,6 +26,21 @@ alter table public.rag_documents enable row level security;
 -- credential in n8n may read/write this table.
 revoke all on table public.rag_documents from anon, authenticated;
 
+create table if not exists public.rag_chat_messages (
+  id bigint generated always as identity primary key,
+  tenant_id uuid not null,
+  user_id uuid not null,
+  conversation_id text not null,
+  role text not null check (role in ('user', 'assistant')),
+  content text not null check (char_length(content) <= 8000),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists rag_chat_messages_scope_idx
+  on public.rag_chat_messages (tenant_id, user_id, conversation_id, created_at desc);
+alter table public.rag_chat_messages enable row level security;
+revoke all on table public.rag_chat_messages from anon, authenticated;
+
 create or replace function public.match_rag_documents(
   query_embedding extensions.vector(768),
   match_tenant_id uuid,
