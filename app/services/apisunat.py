@@ -23,6 +23,14 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(PENNY, rounding=ROUND_HALF_UP)
 
 
+def _json_number(value: Decimal | int | float) -> int | float:
+    """Return a native JSON number; never leave Decimal values in CPE payloads."""
+    decimal_value = Decimal(value)
+    if decimal_value == decimal_value.to_integral_value():
+        return int(decimal_value)
+    return float(decimal_value)
+
+
 def require_apisunat_config(settings: Settings) -> None:
     required = (
         settings.apisunat_persona_id,
@@ -111,7 +119,7 @@ def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, d
         }
         invoice_lines.append({
             "cbc:ID": {"_text": index},
-            "cbc:InvoicedQuantity": {"_attributes": {"unitCode": UNIT_CODES.get(str(line["unit"]).lower(), "NIU")}, "_text": line["quantity"]},
+            "cbc:InvoicedQuantity": {"_attributes": {"unitCode": UNIT_CODES.get(str(line["unit"]).lower(), "NIU")}, "_text": _json_number(line["quantity"])},
             "cbc:LineExtensionAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(taxable)},
             "cac:PricingReference": {"cac:AlternativeConditionPrice": {"cbc:PriceAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(_money(gross / Decimal(line["quantity"])))}, "cbc:PriceTypeCode": {"_text": "01"}}},
             "cac:TaxTotal": {
