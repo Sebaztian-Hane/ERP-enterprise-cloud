@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -62,9 +62,9 @@ def issue_electronic_document(sale_id: str, data: ElectronicDocumentCreate, acto
     if not customer or not items:
         raise HTTPException(status_code=409, detail="La venta no tiene cliente o líneas válidas para facturar")
     tax_id = (customer.tax_id or "").strip()
-    if data.document_type == "01" and len(tax_id) != 11:
+    if data.document_type == "01" and (len(tax_id) != 11 or not tax_id.isdigit()):
         raise HTTPException(status_code=422, detail="Para emitir Factura el cliente debe tener un RUC de 11 dígitos")
-    if data.document_type == "03" and len(tax_id) not in {8, 11}:
+    if data.document_type == "03" and (len(tax_id) not in {8, 11} or not tax_id.isdigit()):
         raise HTTPException(status_code=422, detail="Para emitir Boleta el cliente debe tener DNI de 8 dígitos o RUC de 11 dígitos")
     settings = get_settings()
     series = settings.apisunat_invoice_series if data.document_type == "01" else settings.apisunat_receipt_series
@@ -81,11 +81,14 @@ def issue_electronic_document(sale_id: str, data: ElectronicDocumentCreate, acto
         )
         file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
         response = send_bill(settings, {"personaId": settings.apisunat_persona_id, "personaToken": settings.apisunat_persona_token, "fileName": file_name, "documentBody": body, **({"customerEmail": customer.email} if customer.email else {})})
+        if not response.get("documentId"):
+            raise APISunatError("APISUNAT no devolvió el identificador del comprobante")
     except APISunatError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"))
+    taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     document = ElectronicDocument(tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type, series=series, correlative=correlative, file_name=file_name, status=_provider_status(response.get("status")), provider_document_id=response.get("documentId"), taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total, provider_payload=response)
     db.add(document)
+    db.flush()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="issue", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=f"{file_name} · {response.get('status', 'PENDIENTE')}")
     db.commit()
     db.refresh(document)
@@ -165,6 +168,12 @@ def cancel_sale(sale_id: str, data: CancelTransaction, actor: Actor = Depends(re
         raise HTTPException(status_code=409, detail="La venta no se puede cancelar")
     if account.balance_amount != account.original_amount:
         raise HTTPException(status_code=409, detail="No se puede cancelar una venta con cobros aplicados")
+    electronic_document = db.scalar(select(ElectronicDocument).where(
+        ElectronicDocument.sale_id == sale.id,
+        ElectronicDocument.tenant_id == actor.tenant_id,
+    ))
+    if electronic_document and electronic_document.status not in {"voided", "rejected", "exception"}:
+        raise HTTPException(status_code=409, detail="Primero anula el comprobante electrónico antes de cancelar la venta")
     items = db.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
     for item in items:
         change_stock(db, tenant_id=actor.tenant_id, product_id=item.product_id, warehouse_id=sale.warehouse_id, quantity=item.quantity, movement_type="receipt", reference=f"CANCEL-{sale.number}")
