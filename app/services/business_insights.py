@@ -6,6 +6,7 @@ documents, identifiers and line-item detail are deliberately excluded.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -17,6 +18,7 @@ import httpx
 from app.core.config import Settings
 
 _CACHE: dict[str, "CachedInsight"] = {}
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,5 +74,9 @@ def generate_business_insight(
                 "recommendation": data["recommendation"].strip(), "severity": data.get("severity") if data.get("severity") in {"positive", "info", "attention"} else "info"}
         _CACHE[cache_key] = CachedInsight(data=data, operation_count=operation_count, created_at=time.time())
         return {**data, "cached": False, "operation_count": operation_count}
-    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+    except httpx.HTTPStatusError as exc:
+        logger.warning("business_insight_gemini_error status=%s model=%s", exc.response.status_code, settings.gemini_insight_model)
+        return {"status": "unavailable", "message": "No fue posible generar el análisis automático por ahora."}
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+        logger.warning("business_insight_generation_error type=%s model=%s", type(exc).__name__, settings.gemini_insight_model)
         return {"status": "unavailable", "message": "No fue posible generar el análisis automático por ahora."}

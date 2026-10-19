@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # Gemini is used only by the automatic, aggregated business insight.
     # It is a Render secret and never reaches the client.
     gemini_api_key: str | None = Field(default=None, repr=False)
-    gemini_insight_model: str = "gemini-2.5-flash"
+    gemini_insight_model: str = "gemini-flash-lite-latest"
     insight_min_operations: int = 4
     insight_refresh_min_operations: int = 3
     insight_cache_hours: int = 12
