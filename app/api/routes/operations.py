@@ -230,6 +230,23 @@ def apply_count(count_id: UUID, actor: Actor = Depends(require_permission("inven
         raise HTTPException(status_code=409, detail="El inventario físico requiere una aprobación antes de aplicarse")
     lines = db.execute(text("select * from inventory_count_lines where inventory_count_id=:id and tenant_id=:tenant order by product_id"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().all()
     for line in lines:
+        # Serialize the reconciliation with every regular stock mutation.  The
+        # stock helpers lock this same row, so a receipt/dispatch cannot commit
+        # between the point-in-time validation below and the reconciliation.
+        # A zero row is intentional for a product counted for the first time:
+        # it gives the count a row-level lock even when it had no prior stock.
+        db.execute(text("""
+            insert into inventories(tenant_id,product_id,warehouse_id,quantity)
+            values(:tenant,:product,:warehouse,0)
+            on conflict(tenant_id,product_id,warehouse_id) do nothing
+        """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]),
+               "warehouse": str(count["warehouse_id"])})
+        db.execute(text("""
+            select id from inventories
+            where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse
+            for update
+        """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]),
+               "warehouse": str(count["warehouse_id"])}).scalar_one()
         # A count is a point-in-time document.  Silently replacing a balance
         # after another receipt/dispatch would erase a legitimate movement.
         has_new_movement = db.execute(text("""
