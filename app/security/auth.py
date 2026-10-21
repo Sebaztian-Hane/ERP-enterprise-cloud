@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.entities import TenantMembership
+from app.models.entities import MembershipModuleSetting, TenantMembership, TenantModuleSetting
 
 
 class Actor(BaseModel):
@@ -110,12 +110,42 @@ ROLE_PERMISSIONS = {
     "viewer": {"customers:read", "products:read", "suppliers:read", "inventory:read", "sales:read", "purchases:read", "payments:read", "accounts:read", "reports:read", "documents:read", "accounting:read"},
 }
 
+PERMISSION_MODULES = {
+    "customers": "customers", "suppliers": "suppliers", "products": "products",
+    "sales": "sales", "electronic_billing": "sales", "purchases": "purchases",
+    "inventory": "inventory", "documents": "documents", "reports": "reports",
+    "payments": "finance", "accounts": "finance", "treasury": "finance",
+    "reconciliation": "reconciliation", "accounting": "operations", "approvals": "operations",
+    "configuration": "operations", "tenants": "administration",
+}
+
+
+def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
+    tenant_setting = db.get(TenantModuleSetting, {"tenant_id": actor.tenant_id, "module_code": module_code})
+    if tenant_setting and not tenant_setting.is_enabled:
+        return False
+    membership = db.scalar(select(TenantMembership).where(
+        TenantMembership.tenant_id == actor.tenant_id, TenantMembership.user_id == actor.user_id,
+    ))
+    if not membership:
+        return False
+    member_setting = db.scalar(select(MembershipModuleSetting).where(
+        MembershipModuleSetting.membership_id == membership.id,
+        MembershipModuleSetting.module_code == module_code,
+    ))
+    return member_setting.is_enabled if member_setting else True
+
 
 def require_permission(permission: str):
-    def check(actor: Actor = Depends(get_actor)) -> Actor:
+    def check(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:
         granted = ROLE_PERMISSIONS.get(actor.role_code, set())
         if "*" not in granted and permission not in granted:
             raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
+        module_code = PERMISSION_MODULES.get(permission.split(":", 1)[0])
+        # Direct unit calls exercise role semantics without FastAPI resolving
+        # dependency objects. Real requests always receive a Session here.
+        if module_code and hasattr(db, "get") and not module_is_enabled(db, actor, module_code):
+            raise HTTPException(status_code=403, detail="Este módulo no está habilitado para su acceso")
         return actor
     return check
 

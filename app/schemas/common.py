@@ -27,6 +27,18 @@ class PlatformTenantUpdate(BaseModel):
     is_active: bool
 
 
+class PlatformTenantCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    timezone: str = Field(default="America/Mexico_City", min_length=3, max_length=64)
+    owner_email: EmailStr
+    temporary_password: str = Field(min_length=12, max_length=128)
+
+
+class ModuleToggle(BaseModel):
+    module_code: str = Field(min_length=2, max_length=50)
+    is_enabled: bool
+
+
 class TenantCreate(BaseModel):
     name: str
     timezone: str = "America/Mexico_City"
