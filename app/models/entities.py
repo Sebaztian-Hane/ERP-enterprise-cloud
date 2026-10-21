@@ -136,8 +136,39 @@ class InventoryMovement(TimestampedTenantModel):
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
     movement_type: Mapped[str] = mapped_column(String(24), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    total_cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     reference: Mapped[str | None] = mapped_column(String(100))
     note: Mapped[str | None] = mapped_column(Text)
+
+
+class InventoryLot(TimestampedTenantModel):
+    __tablename__ = "inventory_lots"
+    __table_args__ = (UniqueConstraint("tenant_id", "product_id", "warehouse_id", "lot_number"),)
+    product_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("products.id"), nullable=False)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    lot_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    original_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    available_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    expiration_date: Mapped[date | None] = mapped_column()
+    status: Mapped[str] = mapped_column(String(16), default="available", nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+
+
+class InventorySerial(TimestampedTenantModel):
+    __tablename__ = "inventory_serials"
+    __table_args__ = (UniqueConstraint("tenant_id", "product_id", "serial_number"),)
+    product_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("products.id"), nullable=False)
+    warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    lot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("inventory_lots.id"))
+    serial_number: Mapped[str] = mapped_column(String(120), nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="available", nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
 
 
 class InventoryTransfer(TimestampedTenantModel):

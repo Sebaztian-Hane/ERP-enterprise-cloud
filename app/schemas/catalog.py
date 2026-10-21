@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 from app.schemas.common import ORMModel
@@ -43,6 +44,9 @@ class ProductCreate(BaseModel):
     category_id: UUID | None = None
     unit: str = Field(default="unit", min_length=1, max_length=16)
     sale_price: Decimal = Field(default=Decimal("0"), ge=0)
+    tracking_mode: Literal["none", "lot", "serial"] = "none"
+    cost_method: Literal["weighted_average", "fifo"] = "weighted_average"
+    average_cost: Decimal = Field(default=Decimal("0"), ge=0)
 
 
 class ProductOut(ProductCreate, ORMModel):
@@ -56,6 +60,9 @@ class ProductUpdate(BaseModel):
     category_id: UUID | None = None
     unit: str | None = Field(default=None, min_length=1, max_length=16)
     sale_price: Decimal | None = Field(default=None, ge=0)
+    tracking_mode: Literal["none", "lot", "serial"] | None = None
+    cost_method: Literal["weighted_average", "fifo"] | None = None
+    average_cost: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
 
 

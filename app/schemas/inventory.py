@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -54,6 +55,41 @@ class InventoryMovementOut(ORMModel):
     quantity: Decimal
     reference: str | None
     note: str | None
+
+
+class InventoryLotReceive(BaseModel):
+    product_id: UUID
+    warehouse_id: UUID
+    lot_number: str = Field(min_length=1, max_length=100)
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
+    unit_cost: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    expiration_date: date | None = None
+    note: str | None = None
+
+    @field_validator("quantity")
+    @classmethod
+    def lot_quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad de un lote debe ser un número entero")
+        return value
+
+
+class InventorySerialReceive(BaseModel):
+    product_id: UUID
+    warehouse_id: UUID
+    serial_numbers: list[str] = Field(min_length=1, max_length=100)
+    unit_cost: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    note: str | None = None
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def serials_must_be_unique(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("Cada serie debe tener un valor único")
+        if any(len(value) > 120 for value in normalized):
+            raise ValueError("Una serie no puede superar 120 caracteres")
+        return normalized
 
 
 class InventoryTransferCreate(BaseModel):
