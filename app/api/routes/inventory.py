@@ -104,13 +104,13 @@ def transfer_stock(data: InventoryTransferCreate, actor: Actor = Depends(require
     warehouses = set(db.scalars(select(Warehouse.id).where(Warehouse.id.in_({data.source_warehouse_id, data.destination_warehouse_id}), Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True))).all())
     if not product or warehouses != {data.source_warehouse_id, data.destination_warehouse_id}:
         raise HTTPException(status_code=404, detail="Producto o almacén no encontrado en la empresa activa")
-    transfer = InventoryTransfer(tenant_id=actor.tenant_id, **data.model_dump())
+    # Creation only records the intention.  Stock leaves the source warehouse
+    # at dispatch and reaches the destination at receipt, preserving transit.
+    transfer = InventoryTransfer(tenant_id=actor.tenant_id, status="draft", **data.model_dump())
     db.add(transfer)
     try:
         db.flush()
-        change_stock(db, tenant_id=actor.tenant_id, product_id=data.product_id, warehouse_id=data.source_warehouse_id, quantity=-data.quantity, movement_type="transfer_out", reference=data.number)
-        change_stock(db, tenant_id=actor.tenant_id, product_id=data.product_id, warehouse_id=data.destination_warehouse_id, quantity=data.quantity, movement_type="transfer_in", reference=data.number)
-        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -118,5 +118,60 @@ def transfer_stock(data: InventoryTransferCreate, actor: Actor = Depends(require
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="El número de transferencia ya existe en esta empresa") from exc
+    db.refresh(transfer)
+    return transfer
+
+
+@router.get("/transfers")
+def list_transfers(
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(InventoryTransfer).where(
+        InventoryTransfer.tenant_id == actor.tenant_id,
+    ).order_by(InventoryTransfer.created_at.desc(), InventoryTransfer.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="transfers", page=page or 1, page_size=page_size or 25)
+
+
+@router.post("/transfers/{transfer_id}/dispatch", response_model=InventoryTransferOut)
+def dispatch_transfer(transfer_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    transfer = db.scalar(select(InventoryTransfer).where(
+        InventoryTransfer.id == transfer_id,
+        InventoryTransfer.tenant_id == actor.tenant_id,
+    ).with_for_update())
+    if not transfer or transfer.status != "draft":
+        raise HTTPException(status_code=409, detail="La transferencia debe estar en borrador para despacharse")
+    try:
+        change_stock(db, tenant_id=actor.tenant_id, product_id=transfer.product_id, warehouse_id=transfer.source_warehouse_id,
+                     quantity=-transfer.quantity, movement_type="transfer_out", reference=transfer.number)
+        transfer.status = "in_transit"
+        db.execute(__import__("sqlalchemy").text("update inventory_transfers set dispatched_by=:actor, dispatched_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="dispatch_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    db.refresh(transfer)
+    return transfer
+
+
+@router.post("/transfers/{transfer_id}/receive", response_model=InventoryTransferOut)
+def receive_transfer(transfer_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    transfer = db.scalar(select(InventoryTransfer).where(
+        InventoryTransfer.id == transfer_id,
+        InventoryTransfer.tenant_id == actor.tenant_id,
+    ).with_for_update())
+    if not transfer or transfer.status != "in_transit":
+        raise HTTPException(status_code=409, detail="La transferencia debe estar en tránsito para recibirse")
+    change_stock(db, tenant_id=actor.tenant_id, product_id=transfer.product_id, warehouse_id=transfer.destination_warehouse_id,
+                 quantity=transfer.quantity, movement_type="transfer_in", reference=transfer.number)
+    transfer.status = "completed"
+    db.execute(__import__("sqlalchemy").text("update inventory_transfers set received_by=:actor, received_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+    db.commit()
     db.refresh(transfer)
     return transfer

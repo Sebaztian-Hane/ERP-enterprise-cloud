@@ -3,9 +3,10 @@ from decimal import Decimal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from app.db.session import get_db
+from app.models.entities import Inventory, Product, Warehouse
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 
@@ -107,12 +108,46 @@ def list_reservations(actor: Actor = Depends(require_permission("inventory:read"
 
 @router.post("/inventory/reservations", status_code=status.HTTP_201_CREATED)
 def create_reservation(data: ReservationIn, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
-    available = db.execute(text("""
-        select coalesce(i.quantity,0) - coalesce(sum(r.quantity) filter(where r.status='active'),0)
-        from inventories i left join stock_reservations r on r.tenant_id=i.tenant_id and r.product_id=i.product_id and r.warehouse_id=i.warehouse_id
-        where i.tenant_id=:tenant and i.product_id=:product and i.warehouse_id=:warehouse group by i.quantity
-    """), {"tenant": str(actor.tenant_id), "product": str(data.product_id), "warehouse": str(data.warehouse_id)}).scalar()
-    if available is None or available < data.quantity:
+    # Lock the balance row first.  The prior aggregate-only read allowed two
+    # simultaneous requests to observe the same availability and over-reserve.
+    stock = db.scalar(select(Inventory).where(
+        Inventory.tenant_id == actor.tenant_id,
+        Inventory.product_id == data.product_id,
+        Inventory.warehouse_id == data.warehouse_id,
+    ).with_for_update())
+    product = db.scalar(select(Product.id).where(
+        Product.id == data.product_id,
+        Product.tenant_id == actor.tenant_id,
+        Product.is_active.is_(True),
+    ))
+    warehouse = db.scalar(select(Warehouse.id).where(
+        Warehouse.id == data.warehouse_id,
+        Warehouse.tenant_id == actor.tenant_id,
+        Warehouse.is_active.is_(True),
+    ))
+    if not product or not warehouse:
+        raise HTTPException(status_code=404, detail="Producto o almacén no encontrado en la empresa activa")
+    if stock is None:
+        raise HTTPException(status_code=422, detail="No hay existencias disponibles suficientes para reservar")
+    existing = db.execute(text("""
+        select * from stock_reservations
+        where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse
+          and reference_type=:type and reference=:reference
+          and coalesce(reference_id::text, '')=coalesce(:reference_id, '')
+          and status='active'
+        for update
+    """), {"tenant": str(actor.tenant_id), "product": str(data.product_id), "warehouse": str(data.warehouse_id),
+           "type": data.reference_type, "reference": data.reference,
+           "reference_id": str(data.reference_id) if data.reference_id else None}).mappings().first()
+    if existing:
+        if Decimal(str(existing["quantity"])) != data.quantity:
+            raise HTTPException(status_code=409, detail="La referencia ya tiene una reserva activa con una cantidad distinta")
+        return existing
+    reserved = db.execute(text("""
+        select coalesce(sum(quantity), 0) from stock_reservations
+        where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'
+    """), {"tenant": str(actor.tenant_id), "product": str(data.product_id), "warehouse": str(data.warehouse_id)}).scalar() or Decimal("0")
+    if stock.quantity - Decimal(str(reserved)) < data.quantity:
         raise HTTPException(status_code=422, detail="No hay existencias disponibles suficientes para reservar")
     row = db.execute(text("""
         insert into stock_reservations(tenant_id,product_id,warehouse_id,reference_type,reference_id,reference,quantity,note,created_by)
@@ -154,7 +189,7 @@ def create_count(data: CountIn, actor: Actor = Depends(require_permission("inven
         """), {"tenant": str(actor.tenant_id), "number": data.number, "warehouse": str(data.warehouse_id), "date": data.count_date,
                "reason": data.reason, "note": data.note, "actor": str(actor.user_id)}).mappings().one()
         for line in data.lines:
-            expected = db.execute(text("select coalesce(quantity,0) from inventories where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse"), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or 0
+            expected = db.execute(text("select coalesce(quantity,0) from inventories where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse for share"), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or 0
             inserted = db.execute(text("""
                 insert into inventory_count_lines(tenant_id,inventory_count_id,product_id,expected_quantity,counted_quantity,note)
                 select :tenant,:count,:product,:expected,:counted,:note where exists(select 1 from products where id=:product and tenant_id=:tenant and is_active=true)
@@ -193,8 +228,20 @@ def apply_count(count_id: UUID, actor: Actor = Depends(require_permission("inven
     approval = db.execute(text("select status from approval_requests where tenant_id=:tenant and entity_type='inventory_count' and entity_id=:id order by created_at desc limit 1"), {"tenant": str(actor.tenant_id), "id": str(count_id)}).scalar()
     if approval and approval != "approved":
         raise HTTPException(status_code=409, detail="El inventario físico requiere una aprobación antes de aplicarse")
-    lines = db.execute(text("select * from inventory_count_lines where inventory_count_id=:id and tenant_id=:tenant"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().all()
+    lines = db.execute(text("select * from inventory_count_lines where inventory_count_id=:id and tenant_id=:tenant order by product_id"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().all()
     for line in lines:
+        # A count is a point-in-time document.  Silently replacing a balance
+        # after another receipt/dispatch would erase a legitimate movement.
+        has_new_movement = db.execute(text("""
+            select exists(
+              select 1 from inventory_movements
+              where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse
+                and created_at > :snapshot_at
+            )
+        """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]),
+               "warehouse": str(count["warehouse_id"]), "snapshot_at": count["snapshot_at"]}).scalar()
+        if has_new_movement:
+            raise HTTPException(status_code=409, detail="El stock cambió después del conteo. Crea un nuevo inventario físico para conciliar la diferencia")
         variance = Decimal(str(line["counted_quantity"])) - Decimal(str(line["expected_quantity"]))
         reserved = db.execute(text("""select coalesce(sum(quantity),0) from stock_reservations
             where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'"""), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]), "warehouse": str(count["warehouse_id"])}).scalar() or Decimal("0")
@@ -238,6 +285,7 @@ def list_approvals(actor: Actor = Depends(require_permission("approvals:read")),
 def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       from approval_policies p where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.policy_id=p.id
+      and r.requested_by <> :actor
       and (p.required_role=:role or :role in ('owner','admin')) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
