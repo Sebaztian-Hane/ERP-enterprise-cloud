@@ -144,6 +144,9 @@ def append_internal_decision_evidence(
     approval_request_id: UUID,
     signer_user_id: UUID,
     decision: str,
+    signed_hash: str | None = None,
+    signing_key_id: UUID | None = None,
+    signature_value: str | None = None,
 ) -> None:
     """Append the internal approval evidence; never mutate the original payload."""
     document = db.execute(text("""
@@ -160,17 +163,21 @@ def append_internal_decision_evidence(
         "signer_user_id": signer_user_id,
         "signature_type": "internal_approval",
     }
-    digest = payload_hash(evidence)
+    digest = signed_hash or payload_hash(evidence)
     db.execute(text("""
         insert into approval_signatures(
           tenant_id, approval_document_id, approval_request_id, signer_user_id,
-          signature_type, decision, signed_hash
+          signature_type, decision, signed_hash, signing_key_id, signature_algorithm, signature_value
         ) values (
-          :tenant, :document, :request, :signer, 'internal_approval', :decision, :digest
+          :tenant, :document, :request, :signer, 'internal_approval', :decision, :digest,
+          :key, :algorithm, :signature
         ) on conflict (approval_request_id) where signature_type='internal_approval' do nothing
     """), {
         "tenant": str(tenant_id), "document": str(document["id"]), "request": str(approval_request_id),
         "signer": str(signer_user_id), "decision": decision, "digest": digest,
+        "key": str(signing_key_id) if signing_key_id else None,
+        "algorithm": "ECDSA_P256_SHA256" if signing_key_id else None,
+        "signature": signature_value,
     })
     db.execute(text("""
         update approval_documents set status=:decision, updated_at=now()

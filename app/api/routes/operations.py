@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,6 +10,13 @@ from app.models.entities import Inventory, Product, Warehouse
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.approval_documents import append_internal_decision_evidence, create_inventory_count_evidence
+from app.services.internal_signatures import (
+    jwk_fingerprint,
+    message_hash,
+    signing_message,
+    validate_p256_jwk,
+    verify_p256_signature,
+)
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -55,6 +62,14 @@ class CountIn(BaseModel):
 
 class DecisionIn(BaseModel):
     decision_note: str | None = Field(default=None, max_length=2000)
+    challenge_id: UUID
+    signing_key_id: UUID
+    signature: str = Field(min_length=80, max_length=512)
+
+
+class SigningKeyIn(BaseModel):
+    label: str = Field(default="Este dispositivo", min_length=1, max_length=120)
+    public_jwk: dict[str, str]
 
 
 class PolicyIn(BaseModel):
@@ -305,8 +320,77 @@ def list_approvals(actor: Actor = Depends(require_permission("approvals:read")),
     return db.execute(text("select * from approval_requests where tenant_id=:tenant order by created_at desc"), {"tenant": str(actor.tenant_id)}).mappings().all()
 
 
+@router.post("/approvals/signing-keys", status_code=status.HTTP_201_CREATED)
+def register_signing_key(data: SigningKeyIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+    """Register only a public browser key; the private key never reaches the ERP."""
+    try:
+        validate_p256_jwk(data.public_jwk)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    row = db.execute(text("""
+        insert into user_signing_keys(tenant_id,user_id,label,public_jwk,fingerprint)
+        values(:tenant,:user,:label,cast(:jwk as jsonb),:fingerprint)
+        on conflict(tenant_id,user_id,fingerprint) do update set label=excluded.label, is_active=true, revoked_at=null
+        returning id, label, algorithm, fingerprint, created_at
+    """), {"tenant": str(actor.tenant_id), "user": str(actor.user_id), "label": data.label,
+           "jwk": __import__("json").dumps(data.public_jwk, sort_keys=True), "fingerprint": jwk_fingerprint(data.public_jwk)}).mappings().one()
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="register_signing_key", module="approvals", entity="user_signing_key", entity_id=row["id"])
+    db.commit()
+    return row
+
+
+@router.post("/approvals/{request_id}/signature-challenge")
+def create_signature_challenge(request_id: UUID, decision: str, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(status_code=422, detail="Decisión de firma no válida")
+    row = db.execute(text("""
+        select r.id as request_id, d.id as document_id, d.content_hash
+        from approval_requests r
+        join approval_documents d on d.approval_request_id=r.id and d.tenant_id=r.tenant_id
+        where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
+          and ((r.policy_id is null and :role in ('owner','admin'))
+            or exists(select 1 from approval_policies p where p.id=r.policy_id
+              and (p.required_role=:role or :role in ('owner','admin'))))
+        order by d.created_at desc limit 1
+    """), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "role": actor.role_code}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=409, detail="No puede firmar esta solicitud o no tiene una constancia disponible")
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    challenge = db.execute(text("""
+        insert into approval_signature_challenges(tenant_id,approval_request_id,approval_document_id,signer_user_id,decision,expires_at)
+        values(:tenant,:request,:document,:signer,:decision,:expires) returning id, expires_at
+    """), {"tenant": str(actor.tenant_id), "request": str(request_id), "document": str(row["document_id"]),
+           "signer": str(actor.user_id), "decision": decision, "expires": expires_at}).mappings().one()
+    message = signing_message(challenge_id=challenge["id"], document_id=row["document_id"], document_hash=row["content_hash"], decision=decision, signer_user_id=actor.user_id)
+    db.commit()
+    return {"challenge_id": challenge["id"], "document_id": row["document_id"], "document_hash": row["content_hash"], "message": message, "expires_at": challenge["expires_at"], "algorithm": "ECDSA_P256_SHA256"}
+
+
+def _verify_decision_signature(request_id: UUID, data: DecisionIn, decision: str, actor: Actor, db: Session) -> dict:
+    challenge = db.execute(text("""
+        select c.*, d.content_hash, k.public_jwk
+        from approval_signature_challenges c
+        join approval_documents d on d.id=c.approval_document_id and d.tenant_id=c.tenant_id
+        join user_signing_keys k on k.id=:key and k.tenant_id=c.tenant_id and k.user_id=c.signer_user_id and k.is_active=true
+        where c.id=:challenge and c.approval_request_id=:request and c.tenant_id=:tenant
+          and c.signer_user_id=:actor and c.decision=:decision and c.used_at is null and c.expires_at > now()
+        for update
+    """), {"challenge": str(data.challenge_id), "request": str(request_id), "tenant": str(actor.tenant_id),
+           "actor": str(actor.user_id), "decision": decision, "key": str(data.signing_key_id)}).mappings().first()
+    if not challenge:
+        raise HTTPException(status_code=409, detail="La solicitud de firma expiró, fue usada o no corresponde a este documento")
+    message = signing_message(challenge_id=challenge["id"], document_id=challenge["approval_document_id"], document_hash=challenge["content_hash"], decision=decision, signer_user_id=actor.user_id)
+    try:
+        verify_p256_signature(public_jwk=challenge["public_jwk"], message=message, signature_b64=data.signature)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.execute(text("update approval_signature_challenges set used_at=now() where id=:id and used_at is null"), {"id": str(challenge["id"])})
+    return {"signed_hash": message_hash(message), "signing_key_id": data.signing_key_id, "signature_value": data.signature}
+
+
 @router.post("/approvals/{request_id}/approve")
 def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+    signature = _verify_decision_signature(request_id, data, "approved", actor, db)
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
       and (
@@ -316,7 +400,7 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
       ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved")
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='approved' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
@@ -325,6 +409,7 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
 
 @router.post("/approvals/{request_id}/reject")
 def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+    signature = _verify_decision_signature(request_id, data, "rejected", actor, db)
     row = db.execute(text("""update approval_requests r set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
       and (
@@ -333,7 +418,7 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
           and (p.required_role=:role or :role in ('owner','admin')))
       ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row: raise HTTPException(status_code=409, detail="La solicitud no existe o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected")
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='cancelled' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)

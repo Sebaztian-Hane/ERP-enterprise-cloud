@@ -80,7 +80,8 @@ def list_approval_records(
                  'id', s.id, 'type', s.signature_type, 'decision', s.decision,
                  'signed_hash', s.signed_hash, 'signed_at', s.signed_at,
                  'certificate_subject', s.certificate_subject, 'certificate_issuer', s.certificate_issuer,
-                 'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference
+                 'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference,
+                 'signature_algorithm', s.signature_algorithm
                ) order by s.created_at) filter (where s.id is not null), '[]'::jsonb) as signatures
         from approval_documents d
         left join approval_signatures s on s.approval_document_id=d.id and s.tenant_id=d.tenant_id
@@ -98,7 +99,8 @@ def approval_record(record_id: UUID, actor: Actor = Depends(require_permission("
           'id', s.id, 'type', s.signature_type, 'decision', s.decision,
           'signed_hash', s.signed_hash, 'signed_at', s.signed_at,
           'certificate_subject', s.certificate_subject, 'certificate_issuer', s.certificate_issuer,
-          'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference
+          'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference,
+          'signature_algorithm', s.signature_algorithm
         ) order by s.created_at) filter (where s.id is not null), '[]'::jsonb) as signatures
         from approval_documents d
         left join approval_signatures s on s.approval_document_id=d.id and s.tenant_id=d.tenant_id
