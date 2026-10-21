@@ -18,6 +18,15 @@ class TenantOut(ORMModel):
     is_active: bool
 
 
+class PlatformTenantOut(TenantOut):
+    created_at: datetime
+    active_members: int
+
+
+class PlatformTenantUpdate(BaseModel):
+    is_active: bool
+
+
 class TenantCreate(BaseModel):
     name: str
     timezone: str = "America/Mexico_City"

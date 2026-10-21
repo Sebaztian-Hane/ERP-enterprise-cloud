@@ -19,6 +19,13 @@ class Actor(BaseModel):
     role_code: str
 
 
+class PlatformActor(BaseModel):
+    """A verified EnterpriseCloud provider identity, never a tenant role."""
+
+    user_id: UUID
+    email: str
+
+
 @lru_cache
 def jwk_client() -> PyJWKClient | None:
     url = get_settings().supabase_jwks_url
@@ -69,6 +76,30 @@ def get_user_id(authorization: str = Header(...)) -> UUID:
         return UUID(claims["sub"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="El token no contiene un usuario válido") from exc
+
+
+def platform_actor_from_claims(claims: dict) -> PlatformActor:
+    """Authorize the provider from a verified JWT and server-side allowlist.
+
+    `user_metadata` is intentionally never used here because a signed-in user
+    can modify it. The email is read only after signature verification and is
+    compared with a private Render configuration value.
+    """
+    try:
+        user_id = UUID(claims["sub"])
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="El token no contiene un usuario válido") from exc
+    email = claims.get("email")
+    allowed = get_settings().platform_admin_email_set
+    if not isinstance(email, str) or email.casefold() not in allowed:
+        raise HTTPException(status_code=403, detail="No tiene acceso a la consola de proveedor")
+    return PlatformActor(user_id=user_id, email=email)
+
+
+def require_platform_admin(authorization: str = Header(...)) -> PlatformActor:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Se requiere un token Bearer")
+    return platform_actor_from_claims(decode_access_token(authorization.removeprefix("Bearer ")))
 
 
 ROLE_PERMISSIONS = {

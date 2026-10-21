@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str | None = Field(default=None, repr=False)
     supabase_service_role_key: str | None = Field(default=None, repr=False)
     documents_bucket: str = "erp-documents"
+    # Global provider access is deliberately independent from a tenant role.
+    # Keep this server-side allowlist in Render; it must never be sent to the
+    # browser or be derived from editable user metadata.
+    platform_admin_emails: str = Field(default="", repr=False)
     invite_redirect_url: str | None = None
     # Mail is sent only from the API. These values are Render secrets and must
     # never be exposed through the frontend or persisted in the database.
@@ -55,6 +59,14 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def platform_admin_email_set(self) -> set[str]:
+        return {
+            email.strip().casefold()
+            for email in self.platform_admin_emails.split(",")
+            if email.strip()
+        }
 
 
 @lru_cache

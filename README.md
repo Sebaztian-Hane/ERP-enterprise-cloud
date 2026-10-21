@@ -31,6 +31,10 @@ Usa el Dockerfile, define el comando por defecto y configura `DATABASE_URL`, `SU
 
 Para la carga de documentos, añade también `SUPABASE_SERVICE_ROLE_KEY` solo en Render. La API usa esta clave internamente para escribir en el bucket privado `erp-documents`; no debe enviarse al navegador.
 
+## Consola de proveedor
+
+La ruta `/oreo` es la entrada de la consola de gestión global de empresas. No es una medida de seguridad por sí sola: la API solo entrega información global cuando el JWT verificado corresponde a un correo incluido en `PLATFORM_ADMIN_EMAILS` de Render. Configura ese valor como una lista separada por comas y mantenlo fuera de Vercel, del repositorio y de los metadatos editables del usuario.
+
 ## Operación, monitoreo y recuperación
 
 - Configura Render para supervisar `/ready`: devuelve `200` solo si la API puede conectarse a PostgreSQL; un error de base de datos devuelve `503`.
