@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.models.entities import Inventory, Product, Warehouse
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.services.approval_documents import append_internal_decision_evidence, create_inventory_count_evidence
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -213,9 +214,15 @@ def submit_count(count_id: UUID, actor: Actor = Depends(require_permission("inve
         raise HTTPException(status_code=409, detail="El conteo no está en borrador")
     policy = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='inventory' and action='physical_count'
        and is_active=true order by min_amount desc limit 1"""), {"tenant": str(actor.tenant_id)}).scalar()
+    request_id = None
     if policy:
-        db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
-           values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,jsonb_build_object('number',:number),:actor)"""), {"tenant": str(actor.tenant_id), "policy": str(policy), "count": str(count_id), "number": row["number"], "actor": str(actor.user_id)})
+        request_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
+           values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,jsonb_build_object('number',:number),:actor)
+           returning id"""), {"tenant": str(actor.tenant_id), "policy": str(policy), "count": str(count_id), "number": row["number"], "actor": str(actor.user_id)}).scalar_one()
+    create_inventory_count_evidence(
+        db, tenant_id=actor.tenant_id, count_id=count_id, approval_request_id=request_id, requested_by=actor.user_id,
+    )
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="submit", module="inventory", entity="inventory_count", entity_id=count_id)
     db.commit()
     return row
 
@@ -306,6 +313,7 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
       and (p.required_role=:role or :role in ('owner','admin')) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved")
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
@@ -315,6 +323,7 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
     row = db.execute(text("""update approval_requests set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where id=:id and tenant_id=:tenant and status='pending' returning *"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
     if not row: raise HTTPException(status_code=409, detail="La solicitud no existe o ya fue resuelta")
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected")
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
