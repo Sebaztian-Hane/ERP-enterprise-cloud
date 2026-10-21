@@ -9,6 +9,7 @@ class SaleLineCreate(BaseModel):
     product_id: UUID
     quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     unit_price: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    serial_numbers: list[str] | None = Field(default=None, max_length=100)
 
     @field_validator("quantity")
     @classmethod
@@ -16,6 +17,16 @@ class SaleLineCreate(BaseModel):
         if value != value.to_integral_value():
             raise ValueError("La cantidad debe ser un número entero")
         return value
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def sale_serials_must_be_unique(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return values
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("Las series de una línea deben ser únicas")
+        return normalized
 
 
 class SaleCustomerCreate(BaseModel):
@@ -65,6 +76,9 @@ class PurchaseLineCreate(BaseModel):
     product_id: UUID
     quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
     unit_cost: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    lot_number: str | None = Field(default=None, max_length=100)
+    expiration_date: date | None = None
+    serial_numbers: list[str] | None = Field(default=None, max_length=100)
 
     @field_validator("quantity")
     @classmethod
@@ -72,6 +86,16 @@ class PurchaseLineCreate(BaseModel):
         if value != value.to_integral_value():
             raise ValueError("La cantidad debe ser un número entero")
         return value
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def serials_must_be_unique(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return values
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("Las series de una línea deben ser únicas")
+        return normalized
 
 
 class PurchaseCreate(BaseModel):

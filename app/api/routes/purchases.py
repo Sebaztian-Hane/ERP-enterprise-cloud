@@ -10,7 +10,7 @@ from app.schemas.transactions import CancelTransaction, PurchaseCreate, Purchase
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
-from app.services.stock import change_stock
+from app.services.traceability import receive_tracked_stock, reverse_tracked_purchase_receipt
 from app.services.accounting import post_entry, reverse_entry, split_tax
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
@@ -65,12 +65,20 @@ def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permis
             if product_cost and product_cost.cost_method == "weighted_average":
                 base_value = stock_before * product_cost.average_cost
                 product_cost.average_cost = ((base_value + line.quantity * line.unit_cost) / (stock_before + line.quantity)).quantize(Decimal("0.01"))
-            change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=line.quantity, movement_type="receipt", reference=data.number)
+            receive_tracked_stock(
+                db, tenant_id=actor.tenant_id, actor_id=actor.user_id, product=product_cost,
+                warehouse_id=data.warehouse_id, quantity=line.quantity, unit_cost=line.unit_cost,
+                reference=data.number, lot_number=line.lot_number,
+                expiration_date=line.expiration_date, serial_numbers=line.serial_numbers,
+            )
         tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else split_tax(total)[1]
         net = total - tax
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="El número de compra ya existe en esta empresa") from exc
@@ -89,7 +97,17 @@ def cancel_purchase(purchase_id: str, data: CancelTransaction, actor: Actor = De
     items = db.scalars(select(PurchaseItem).where(PurchaseItem.purchase_id == purchase.id, PurchaseItem.tenant_id == actor.tenant_id)).all()
     try:
         for item in items:
-            change_stock(db, tenant_id=actor.tenant_id, product_id=item.product_id, warehouse_id=purchase.warehouse_id, quantity=-item.quantity, movement_type="issue", reference=f"CANCEL-{purchase.number}")
+            product = db.scalar(select(Product).where(
+                Product.id == item.product_id,
+                Product.tenant_id == actor.tenant_id,
+            ).with_for_update())
+            if not product:
+                raise HTTPException(status_code=409, detail="No se encontró el producto de una línea de compra")
+            reverse_tracked_purchase_receipt(
+                db, tenant_id=actor.tenant_id, product=product, warehouse_id=purchase.warehouse_id,
+                quantity=item.quantity, purchase_reference=purchase.number,
+                reversal_reference=f"CANCEL-{purchase.number}",
+            )
         purchase.status = "cancelled"
         account.status = "cancelled"
         reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{purchase.number}", description=f"Reversión de compra {purchase.number}", original_source_type="purchase", original_source_id=purchase.id, reversal_source_type="purchase_cancel")

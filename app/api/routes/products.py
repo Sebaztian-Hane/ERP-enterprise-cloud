@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Category, Product
+from app.models.entities import Category, Inventory, InventoryLot, InventorySerial, Product
 from app.schemas.catalog import CategoryCreate, CategoryOut, ProductCreate, ProductOut, ProductUpdate
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
@@ -69,6 +69,21 @@ def update_product(product_id: UUID, data: ProductUpdate, actor: Actor = Depends
     changes = data.model_dump(exclude_unset=True)
     if changes.get("category_id") and not db.scalar(select(Category.id).where(Category.id == changes["category_id"], Category.tenant_id == actor.tenant_id)):
         raise HTTPException(status_code=404, detail="Categoría no encontrada en la empresa activa")
+    if "tracking_mode" in changes and changes["tracking_mode"] != product.tracking_mode:
+        has_stock = db.scalar(select(Inventory.id).where(
+            Inventory.tenant_id == actor.tenant_id,
+            Inventory.product_id == product.id,
+            Inventory.quantity != 0,
+        ).limit(1))
+        has_evidence = db.scalar(select(InventoryLot.id).where(
+            InventoryLot.tenant_id == actor.tenant_id,
+            InventoryLot.product_id == product.id,
+        ).limit(1)) or db.scalar(select(InventorySerial.id).where(
+            InventorySerial.tenant_id == actor.tenant_id,
+            InventorySerial.product_id == product.id,
+        ).limit(1))
+        if has_stock or has_evidence:
+            raise HTTPException(status_code=409, detail="No se puede cambiar el control de trazabilidad de un producto con existencias o historial")
     for field, value in changes.items():
         setattr(product, field, value)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update", module="products", entity="product", entity_id=product.id)

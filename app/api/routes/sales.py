@@ -13,7 +13,7 @@ from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
-from app.services.stock import change_stock
+from app.services.traceability import issue_tracked_stock, return_tracked_sale_stock
 from app.services.decolecta import DecolectaError, lookup_tax_id
 from app.services.accounting import post_entry, reverse_entry, split_tax
 
@@ -192,13 +192,24 @@ def post_sale(data: SaleCreate, actor: Actor = Depends(require_permission("sales
     try:
         db.flush()
         db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open", due_date=data.due_date or datetime.now(timezone.utc).date()))
+        products_by_id = {product.id: product for product in db.scalars(select(Product).where(
+            Product.tenant_id == actor.tenant_id,
+            Product.id.in_(product_ids),
+        ).with_for_update()).all()}
         for line in data.lines:
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=line.quantity * line.unit_price))
-            change_stock(db, tenant_id=actor.tenant_id, product_id=line.product_id, warehouse_id=data.warehouse_id, quantity=-line.quantity, movement_type="issue", reference=data.number)
+            issue_tracked_stock(
+                db, tenant_id=actor.tenant_id, product=products_by_id[line.product_id],
+                warehouse_id=data.warehouse_id, quantity=line.quantity, reference=data.number,
+                serial_numbers=line.serial_numbers,
+            )
         net, tax = split_tax(total)
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Venta {data.number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="El número de venta ya existe en esta empresa") from exc
@@ -222,7 +233,16 @@ def cancel_sale(sale_id: str, data: CancelTransaction, actor: Actor = Depends(re
         raise HTTPException(status_code=409, detail="Primero anula el comprobante electrónico antes de cancelar la venta")
     items = db.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
     for item in items:
-        change_stock(db, tenant_id=actor.tenant_id, product_id=item.product_id, warehouse_id=sale.warehouse_id, quantity=item.quantity, movement_type="receipt", reference=f"CANCEL-{sale.number}")
+        product = db.scalar(select(Product).where(
+            Product.id == item.product_id,
+            Product.tenant_id == actor.tenant_id,
+        ).with_for_update())
+        if not product:
+            raise HTTPException(status_code=409, detail="No se encontró el producto de una línea de venta")
+        return_tracked_sale_stock(
+            db, tenant_id=actor.tenant_id, product=product, warehouse_id=sale.warehouse_id,
+            quantity=item.quantity, sale_reference=sale.number, reversal_reference=f"CANCEL-{sale.number}",
+        )
     sale.status = "cancelled"
     account.status = "cancelled"
     reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{sale.number}", description=f"Reversión de venta {sale.number}", original_source_type="sale", original_source_id=sale.id, reversal_source_type="sale_cancel")
