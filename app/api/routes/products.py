@@ -1,11 +1,12 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Category, Product
 from app.schemas.catalog import CategoryCreate, CategoryOut, ProductCreate, ProductOut, ProductUpdate
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 
@@ -31,9 +32,17 @@ def create_category(data: CategoryCreate, actor: Actor = Depends(require_permiss
     return category
 
 
-@router.get("", response_model=list[ProductOut])
-def list_products(actor: Actor = Depends(require_permission("products:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Product).where(Product.tenant_id == actor.tenant_id).order_by(Product.name)).all()
+@router.get("")
+def list_products(
+    actor: Actor = Depends(require_permission("products:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Product).where(Product.tenant_id == actor.tenant_id).order_by(Product.name, Product.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="products", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("", response_model=ProductOut, status_code=status.HTTP_201_CREATED)

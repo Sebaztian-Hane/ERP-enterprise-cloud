@@ -1,12 +1,13 @@
 from decimal import Decimal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Inventory, InventoryMovement, InventoryTransfer, Product, Warehouse
 from app.schemas.inventory import InventoryMovementOut, InventoryOut, InventoryTransferCreate, InventoryTransferOut, StockAdjustment, WarehouseCreate, WarehouseOut, WarehouseUpdate
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
@@ -50,14 +51,30 @@ def update_warehouse(warehouse_id: UUID, data: WarehouseUpdate, actor: Actor = D
     return warehouse
 
 
-@router.get("/stock", response_model=list[InventoryOut])
-def list_stock(actor: Actor = Depends(require_permission("inventory:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Inventory).where(Inventory.tenant_id == actor.tenant_id).order_by(Inventory.product_id, Inventory.warehouse_id)).all()
+@router.get("/stock")
+def list_stock(
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Inventory).where(Inventory.tenant_id == actor.tenant_id).order_by(Inventory.product_id, Inventory.warehouse_id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="stock", page=page or 1, page_size=page_size or 25)
 
 
-@router.get("/movements", response_model=list[InventoryMovementOut])
-def list_movements(actor: Actor = Depends(require_permission("inventory:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(InventoryMovement).where(InventoryMovement.tenant_id == actor.tenant_id).order_by(InventoryMovement.created_at.desc())).all()
+@router.get("/movements")
+def list_movements(
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(InventoryMovement).where(InventoryMovement.tenant_id == actor.tenant_id).order_by(InventoryMovement.created_at.desc(), InventoryMovement.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="movements", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("/adjustments", response_model=InventoryMovementOut, status_code=status.HTTP_201_CREATED)

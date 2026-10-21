@@ -1,6 +1,6 @@
 from pathlib import PurePath
 from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
@@ -8,6 +8,7 @@ from app.core.rate_limit import limiter
 from app.db.session import get_db
 from app.models.entities import Document
 from app.schemas.documents import DocumentOut, SignedUrlOut
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.storage.supabase import signed_url, upload
@@ -16,9 +17,17 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 ALLOWED_TYPES = {"application/pdf", "image/jpeg", "image/png", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
-@router.get("", response_model=list[DocumentOut])
-def list_documents(actor: Actor = Depends(require_permission("documents:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Document).where(Document.tenant_id == actor.tenant_id).order_by(Document.created_at.desc())).all()
+@router.get("")
+def list_documents(
+    actor: Actor = Depends(require_permission("documents:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Document).where(Document.tenant_id == actor.tenant_id).order_by(Document.created_at.desc(), Document.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="documents", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)

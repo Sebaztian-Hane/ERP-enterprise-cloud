@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.models.entities import AccountReceivable, Customer, ElectronicDocument, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, SaleCreate, SaleOut
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
@@ -28,9 +29,17 @@ def list_sale_warehouses(actor: Actor = Depends(require_permission("sales:read")
     ).order_by(Warehouse.name)).all()
 
 
-@router.get("", response_model=list[SaleOut])
-def list_sales(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Sale).where(Sale.tenant_id == actor.tenant_id).order_by(Sale.created_at.desc())).all()
+@router.get("")
+def list_sales(
+    actor: Actor = Depends(require_permission("sales:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Sale).where(Sale.tenant_id == actor.tenant_id).order_by(Sale.created_at.desc(), Sale.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="sales", page=page or 1, page_size=page_size or 25)
 
 
 @router.get("/customer-lookup/{tax_id}")

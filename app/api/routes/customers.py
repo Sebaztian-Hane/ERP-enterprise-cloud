@@ -1,20 +1,29 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Customer
 from app.schemas.catalog import CustomerCreate, CustomerOut, CustomerUpdate
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
 
-@router.get("", response_model=list[CustomerOut])
-def list_customers(actor: Actor = Depends(require_permission("customers:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Customer).where(Customer.tenant_id == actor.tenant_id).order_by(Customer.name)).all()
+@router.get("")
+def list_customers(
+    actor: Actor = Depends(require_permission("customers:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Customer).where(Customer.tenant_id == actor.tenant_id).order_by(Customer.name, Customer.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="customers", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("", response_model=CustomerOut, status_code=status.HTTP_201_CREATED)

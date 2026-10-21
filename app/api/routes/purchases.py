@@ -1,12 +1,13 @@
 from datetime import datetime, time, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import AccountPayable, Product, Purchase, PurchaseItem, Supplier, Warehouse
 from app.schemas.transactions import CancelTransaction, PurchaseCreate, PurchaseOut
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
@@ -24,9 +25,17 @@ def list_purchase_warehouses(actor: Actor = Depends(require_permission("purchase
     ).order_by(Warehouse.name)).all()
 
 
-@router.get("", response_model=list[PurchaseOut])
-def list_purchases(actor: Actor = Depends(require_permission("purchases:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Purchase).where(Purchase.tenant_id == actor.tenant_id).order_by(Purchase.created_at.desc())).all()
+@router.get("")
+def list_purchases(
+    actor: Actor = Depends(require_permission("purchases:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Purchase).where(Purchase.tenant_id == actor.tenant_id).order_by(Purchase.created_at.desc(), Purchase.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="purchases", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("", response_model=PurchaseOut, status_code=status.HTTP_201_CREATED)

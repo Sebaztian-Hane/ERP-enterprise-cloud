@@ -1,11 +1,12 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Supplier
 from app.schemas.catalog import SupplierCreate, SupplierOut, SupplierUpdate
+from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.core.config import get_settings
@@ -14,9 +15,17 @@ from app.services.decolecta import DecolectaError, lookup_tax_id
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
 
-@router.get("", response_model=list[SupplierOut])
-def list_suppliers(actor: Actor = Depends(require_permission("suppliers:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Supplier).where(Supplier.tenant_id == actor.tenant_id).order_by(Supplier.name)).all()
+@router.get("")
+def list_suppliers(
+    actor: Actor = Depends(require_permission("suppliers:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Supplier).where(Supplier.tenant_id == actor.tenant_id).order_by(Supplier.name, Supplier.id)
+    if not isinstance(page, int) and not isinstance(page_size, int):
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="suppliers", page=page or 1, page_size=page_size or 25)
 
 
 @router.get("/lookup/{tax_id}")
