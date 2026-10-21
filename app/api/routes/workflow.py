@@ -10,6 +10,8 @@ from app.security.auth import Actor, require_permission
 from app.schemas.transactions import PurchaseCreate, PurchaseLineCreate, SaleCreate, SaleLineCreate
 from app.api.routes.sales import post_sale
 from app.api.routes.purchases import receive_purchase
+from app.services.approval_documents import create_purchase_order_evidence
+from app.services.audit import record
 
 router = APIRouter(tags=["workflow"])
 
@@ -60,6 +62,43 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
 
     @router.post(prefix + "/{document_id}/status")
     def change_status(document_id: UUID, data: StatusChange, actor: Actor = Depends(require_permission(write_permission)), db: Session = Depends(get_db)):
+        if table == "purchase_orders" and data.status == "submitted":
+            order = db.execute(__import__("sqlalchemy").text("""
+                select * from purchase_orders where id=:id and tenant_id=:tenant and status='draft' for update
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+            if not order:
+                raise HTTPException(status_code=409, detail="La orden no existe o ya fue enviada")
+            line_count = db.execute(__import__("sqlalchemy").text("""
+                select count(*) from purchase_order_items where purchase_order_id=:id and tenant_id=:tenant
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).scalar_one()
+            if not line_count:
+                raise HTTPException(status_code=422, detail="Agrega al menos una línea antes de enviar la orden")
+            policy = db.execute(__import__("sqlalchemy").text("""
+                select id from approval_policies
+                where tenant_id=:tenant and module='purchases' and action='purchase_order'
+                  and is_active=true and min_amount <= :amount
+                order by min_amount desc limit 1
+            """), {"tenant": str(actor.tenant_id), "amount": order["total"]}).scalar()
+            request_id = db.execute(__import__("sqlalchemy").text("""
+                insert into approval_requests(tenant_id, policy_id, module, action, entity_type, entity_id, amount, payload, requested_by)
+                values(:tenant, :policy, 'purchases', 'purchase_order', 'purchase_order', :order, :amount,
+                       jsonb_build_object('number', :number, 'total', :amount), :actor)
+                returning id
+            """), {"tenant": str(actor.tenant_id), "policy": str(policy) if policy else None,
+                   "order": str(document_id), "amount": order["total"], "number": order["number"], "actor": str(actor.user_id)}).scalar_one()
+            create_purchase_order_evidence(
+                db, tenant_id=actor.tenant_id, order_id=document_id, approval_request_id=request_id, requested_by=actor.user_id,
+            )
+            row = db.execute(__import__("sqlalchemy").text("""
+                update purchase_orders set status='submitted' where id=:id and tenant_id=:tenant returning *
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().one()
+            record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="submit", module="purchases", entity="purchase_order", entity_id=document_id)
+            db.commit()
+            return row
+        if table == "purchase_orders" and data.status == "approved":
+            raise HTTPException(status_code=403, detail="La orden debe aprobarse desde el flujo de aprobaciones")
+        if table == "purchase_orders" and data.status != "cancelled":
+            raise HTTPException(status_code=422, detail="Transición de orden de compra no permitida")
         if data.status not in allowed:
             raise HTTPException(status_code=422, detail="Estado no permitido")
         row = db.execute(__import__("sqlalchemy").text(f"update {table} set status = :status where id = :id and tenant_id = :tenant returning *"), {"status": data.status, "id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
@@ -70,7 +109,7 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
 
 _register("/quotes", "sales_quotes", "customer_id", Customer, "sales:write", {"draft", "approved", "cancelled"})
 _register("/sales-orders", "sales_orders", "customer_id", Customer, "sales:write", {"draft", "confirmed", "cancelled"})
-_register("/purchase-orders", "purchase_orders", "supplier_id", Supplier, "purchases:write", {"draft", "approved", "cancelled"})
+_register("/purchase-orders", "purchase_orders", "supplier_id", Supplier, "purchases:write", {"draft", "submitted", "cancelled"})
 
 def _line_endpoint(prefix: str, header: str, detail: str, key: str, value_column: str, permission: str):
     @router.post(prefix + "/{document_id}/lines", status_code=status.HTTP_201_CREATED)

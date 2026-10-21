@@ -308,22 +308,34 @@ def list_approvals(actor: Actor = Depends(require_permission("approvals:read")),
 @router.post("/approvals/{request_id}/approve")
 def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
-      from approval_policies p where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.policy_id=p.id
-      and r.requested_by <> :actor
-      and (p.required_role=:role or :role in ('owner','admin')) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
+      where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
+      and (
+        (r.policy_id is null and :role in ('owner','admin'))
+        or exists(select 1 from approval_policies p where p.id=r.policy_id
+          and (p.required_role=:role or :role in ('owner','admin')))
+      ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
     append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved")
+    if row["entity_type"] == "purchase_order":
+        db.execute(text("""update purchase_orders set status='approved' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
 
 @router.post("/approvals/{request_id}/reject")
 def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
-    row = db.execute(text("""update approval_requests set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
-      where id=:id and tenant_id=:tenant and status='pending' returning *"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
+    row = db.execute(text("""update approval_requests r set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
+      where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
+      and (
+        (r.policy_id is null and :role in ('owner','admin'))
+        or exists(select 1 from approval_policies p where p.id=r.policy_id
+          and (p.required_role=:role or :role in ('owner','admin')))
+      ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
     if not row: raise HTTPException(status_code=409, detail="La solicitud no existe o ya fue resuelta")
     append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected")
+    if row["entity_type"] == "purchase_order":
+        db.execute(text("""update purchase_orders set status='cancelled' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 

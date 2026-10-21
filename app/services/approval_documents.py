@@ -87,6 +87,56 @@ def create_inventory_count_evidence(
     }).mappings().one()
 
 
+def create_purchase_order_evidence(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    order_id: UUID,
+    approval_request_id: UUID,
+    requested_by: UUID,
+) -> dict[str, Any]:
+    """Create the immutable request snapshot for a purchase order."""
+    header = db.execute(text("""
+        select o.number, o.total, s.code as supplier_code, s.name as supplier_name,
+               s.tax_id as supplier_tax_id, w.code as warehouse_code, w.name as warehouse_name
+        from purchase_orders o
+        join suppliers s on s.id=o.supplier_id and s.tenant_id=o.tenant_id
+        join warehouses w on w.id=o.warehouse_id and w.tenant_id=o.tenant_id
+        where o.id=:order_id and o.tenant_id=:tenant
+    """), {"order_id": str(order_id), "tenant": str(tenant_id)}).mappings().one()
+    lines = db.execute(text("""
+        select p.sku, p.name as product_name, p.unit, l.quantity, l.unit_cost, l.line_total
+        from purchase_order_items l
+        join products p on p.id=l.product_id and p.tenant_id=l.tenant_id
+        where l.purchase_order_id=:order_id and l.tenant_id=:tenant
+        order by p.sku, p.name
+    """), {"order_id": str(order_id), "tenant": str(tenant_id)}).mappings().all()
+    payload = {
+        "schema": "enterprisecloud.approval-document.v1",
+        "document_type": "purchase_order",
+        "number": header["number"],
+        "supplier": {"code": header["supplier_code"], "name": header["supplier_name"], "tax_id": header["supplier_tax_id"]},
+        "warehouse": {"code": header["warehouse_code"], "name": header["warehouse_name"]},
+        "total": header["total"],
+        "lines": [dict(line) for line in lines],
+    }
+    serialized = canonicalize(payload)
+    digest = sha256(serialized.encode("utf-8")).hexdigest()
+    return db.execute(text("""
+        insert into approval_documents(
+          tenant_id, approval_request_id, module, entity_type, entity_id,
+          document_number, canonical_payload, content_hash, requested_by
+        ) values (
+          :tenant, :request, 'purchases', 'purchase_order', :order_id,
+          :number, cast(:payload as jsonb), :digest, :requested_by
+        ) returning *
+    """), {
+        "tenant": str(tenant_id), "request": str(approval_request_id), "order_id": str(order_id),
+        "number": f"OC-{header['number']}", "payload": serialized, "digest": digest,
+        "requested_by": str(requested_by),
+    }).mappings().one()
+
+
 def append_internal_decision_evidence(
     db: Session,
     *,
