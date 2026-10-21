@@ -1,6 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -17,10 +17,15 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 def list_customers(
     actor: Actor = Depends(require_permission("customers:read")),
     db: Session = Depends(get_db),
+    q: str | None = Query(default=None, min_length=1, max_length=120),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
 ):
-    statement = select(Customer).where(Customer.tenant_id == actor.tenant_id).order_by(Customer.name, Customer.id)
+    statement = select(Customer).where(Customer.tenant_id == actor.tenant_id)
+    if isinstance(q, str) and q.strip():
+        term = f"%{q.strip()}%"
+        statement = statement.where(or_(Customer.name.ilike(term), Customer.code.ilike(term), Customer.tax_id.ilike(term)))
+    statement = statement.order_by(Customer.name, Customer.id)
     if not isinstance(page, int) and not isinstance(page_size, int):
         return db.scalars(statement).all()
     return paginate(db, statement, key="customers", page=page or 1, page_size=page_size or 25)
