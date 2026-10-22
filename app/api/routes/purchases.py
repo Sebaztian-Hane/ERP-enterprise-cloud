@@ -1,6 +1,6 @@
 from datetime import datetime, time, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.traceability import receive_tracked_stock, reverse_tracked_purchase_receipt
 from app.services.accounting import post_entry, reverse_entry, split_tax
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -39,7 +40,17 @@ def list_purchases(
 
 
 @router.post("", response_model=PurchaseOut, status_code=status.HTTP_201_CREATED)
-def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permission("purchases:write")), db: Session = Depends(get_db)):
+def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depends(require_permission("purchases:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="purchases.receive",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     supplier = db.scalar(select(Supplier.id).where(Supplier.id == data.supplier_id, Supplier.tenant_id == actor.tenant_id, Supplier.is_active.is_(True)))
     warehouse = db.scalar(select(Warehouse.id).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
     product_ids = {line.product_id for line in data.lines}
@@ -75,6 +86,12 @@ def receive_purchase(data: PurchaseCreate, actor: Actor = Depends(require_permis
         net = total - tax
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body=PurchaseOut.model_validate(purchase).model_dump(mode="json"),
+            response_status=status.HTTP_201_CREATED,
+        )
         db.commit()
     except HTTPException:
         db.rollback()

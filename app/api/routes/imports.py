@@ -8,6 +8,7 @@ same file inside one database transaction.
 from __future__ import annotations
 
 import csv
+from hashlib import sha256
 import io
 import re
 import unicodedata
@@ -16,7 +17,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +40,7 @@ from app.models.entities import (
 from app.security.auth import Actor, require_owner_or_admin
 from app.services.accounting import post_entry, split_tax
 from app.services.audit import record
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.stock import change_stock
 
 router = APIRouter(prefix="/imports", tags=["imports"])
@@ -383,13 +385,43 @@ async def preview_import(module: str, file: UploadFile = File(...), actor: Actor
 
 
 @router.post("/{module}/commit", status_code=status.HTTP_201_CREATED)
-async def commit_import(module: str, file: UploadFile = File(...), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+async def commit_import(
+    module: str,
+    request: Request,
+    file: UploadFile = File(...),
+    actor: Actor = Depends(require_owner_or_admin),
+    db: Session = Depends(get_db),
+):
+    # UploadFile is a stream.  Its digest is part of the request identity, so a
+    # reused key cannot accidentally apply a different spreadsheet.  Rewind it
+    # before validation because _preview deliberately reparses the source file.
+    content = await file.read(MAX_FILE_SIZE + 1)
+    await file.seek(0)
+    # Invalid oversized files never reach a business mutation or the database.
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=422, detail="La plantilla debe contener datos y pesar como máximo 5 MB")
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation=f"imports.{module}.commit",
+        key=request.headers.get("Idempotency-Key"),
+        payload={"module": module, "filename": file.filename or "", "content_sha256": sha256(content).hexdigest()},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     valid, errors, conflicts = await _preview(module, file, actor, db)
     if errors or conflicts:
         raise HTTPException(status_code=422, detail={"message": "La plantilla contiene errores y no se migró ningún dato", "errors": errors, "conflicts": conflicts})
     try:
         count = _persist_master(module, valid, actor, db) if module in {"products", "customers", "suppliers", "warehouses"} else _persist_transactions(module, valid, actor, db)
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="bulk_import", module="imports", entity=module, detail=f"{count} registros importados desde plantilla")
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body={"module": module, "imported": count},
+            response_status=status.HTTP_201_CREATED,
+        )
         db.commit()
     except HTTPException:
         db.rollback(); raise

@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.services.internal_signatures import (
     validate_p256_jwk,
     verify_p256_signature,
 )
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -123,7 +124,14 @@ def list_reservations(actor: Actor = Depends(require_permission("inventory:read"
 
 
 @router.post("/inventory/reservations", status_code=status.HTTP_201_CREATED)
-def create_reservation(data: ReservationIn, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def create_reservation(request: Request, data: ReservationIn, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.reservations.create", key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     # Lock the balance row first.  The prior aggregate-only read allowed two
     # simultaneous requests to observe the same availability and over-reserve.
     stock = db.scalar(select(Inventory).where(
@@ -158,6 +166,8 @@ def create_reservation(data: ReservationIn, actor: Actor = Depends(require_permi
     if existing:
         if Decimal(str(existing["quantity"])) != data.quantity:
             raise HTTPException(status_code=409, detail="La referencia ya tiene una reserva activa con una cantidad distinta")
+        complete_idempotency(db, claim=idempotency, response_body=dict(existing), response_status=status.HTTP_201_CREATED)
+        db.commit()
         return existing
     reserved = db.execute(text("""
         select coalesce(sum(quantity), 0) from stock_reservations
@@ -171,17 +181,26 @@ def create_reservation(data: ReservationIn, actor: Actor = Depends(require_permi
     """), {"tenant": str(actor.tenant_id), "product": str(data.product_id), "warehouse": str(data.warehouse_id), "type": data.reference_type,
            "reference_id": str(data.reference_id) if data.reference_id else None, "reference": data.reference, "quantity": data.quantity, "note": data.note, "actor": str(actor.user_id)}).mappings().one()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reserve", module="inventory", entity="stock_reservation", entity_id=row["id"], detail=data.reference)
+    complete_idempotency(db, claim=idempotency, response_body=dict(row), response_status=status.HTTP_201_CREATED)
     db.commit()
     return row
 
 
 @router.post("/inventory/reservations/{reservation_id}/release")
-def release_reservation(reservation_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def release_reservation(reservation_id: UUID, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.reservations.release", key=request.headers.get("Idempotency-Key"),
+        payload={"reservation_id": str(reservation_id)},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     row = db.execute(text("""update stock_reservations set status='released', released_at=now(), updated_at=now()
         where id=:id and tenant_id=:tenant and status='active' returning *"""), {"id": str(reservation_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="La reserva no existe o ya fue liberada")
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="release", module="inventory", entity="stock_reservation", entity_id=reservation_id)
+    complete_idempotency(db, claim=idempotency, response_body=dict(row), response_status=status.HTTP_200_OK)
     db.commit()
     return row
 
@@ -192,7 +211,14 @@ def list_counts(actor: Actor = Depends(require_permission("inventory:read")), db
 
 
 @router.post("/inventory/counts", status_code=status.HTTP_201_CREATED)
-def create_count(data: CountIn, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def create_count(request: Request, data: CountIn, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.counts.create", key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     if len({line.product_id for line in data.lines}) != len(data.lines):
         raise HTTPException(status_code=422, detail="Un producto solo puede aparecer una vez en el inventario físico")
     warehouse_exists = db.execute(text("select 1 from warehouses where id=:warehouse and tenant_id=:tenant and is_active=true"), {"warehouse": str(data.warehouse_id), "tenant": str(actor.tenant_id)}).first()
@@ -213,6 +239,7 @@ def create_count(data: CountIn, actor: Actor = Depends(require_permission("inven
             if inserted.rowcount != 1:
                 raise HTTPException(status_code=404, detail="Uno de los productos del conteo no pertenece a la empresa activa")
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="inventory", entity="inventory_count", entity_id=count["id"], detail=data.reason)
+        complete_idempotency(db, claim=idempotency, response_body=dict(count), response_status=status.HTTP_201_CREATED)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -223,7 +250,14 @@ def create_count(data: CountIn, actor: Actor = Depends(require_permission("inven
 
 
 @router.post("/inventory/counts/{count_id}/submit")
-def submit_count(count_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def submit_count(count_id: UUID, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.counts.submit", key=request.headers.get("Idempotency-Key"),
+        payload={"count_id": str(count_id)},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     row = db.execute(text("update inventory_counts set status='submitted', updated_at=now() where id=:id and tenant_id=:tenant and status='draft' returning *"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="El conteo no está en borrador")
@@ -238,12 +272,20 @@ def submit_count(count_id: UUID, actor: Actor = Depends(require_permission("inve
         db, tenant_id=actor.tenant_id, count_id=count_id, approval_request_id=request_id, requested_by=actor.user_id,
     )
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="submit", module="inventory", entity="inventory_count", entity_id=count_id)
+    complete_idempotency(db, claim=idempotency, response_body=dict(row), response_status=status.HTTP_200_OK)
     db.commit()
     return row
 
 
 @router.post("/inventory/counts/{count_id}/apply")
-def apply_count(count_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def apply_count(count_id: UUID, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.counts.apply", key=request.headers.get("Idempotency-Key"),
+        payload={"count_id": str(count_id)},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     count = db.execute(text("select * from inventory_counts where id=:id and tenant_id=:tenant for update"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not count or count["status"] not in {"submitted", "approved"}:
         raise HTTPException(status_code=409, detail="El conteo debe estar enviado o aprobado antes de aplicarse")
@@ -298,6 +340,7 @@ def apply_count(count_id: UUID, actor: Actor = Depends(require_permission("inven
                    "reference": count["number"], "note": f"Inventario físico: {count['reason']}"})
     row = db.execute(text("update inventory_counts set status='applied', applied_by=:actor, applied_at=now(), updated_at=now() where id=:id returning *"), {"id": str(count_id), "actor": str(actor.user_id)}).mappings().one()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="apply", module="inventory", entity="inventory_count", entity_id=count_id)
+    complete_idempotency(db, claim=idempotency, response_body=dict(row), response_status=status.HTTP_200_OK)
     db.commit()
     return row
 

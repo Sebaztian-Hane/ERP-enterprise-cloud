@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import logging
-import threading
 import time
 from datetime import datetime
 from decimal import Decimal
@@ -168,12 +167,29 @@ def export_tenant_documents(db: Session, tenant_id: UUID) -> list[dict[str, Any]
 
 
 def queue_sync_event(db: Session, *, tenant_id: UUID, module: str, entity: str, entity_id: UUID | None, action: str) -> None:
-    """Queue an outbound event; Session listeners send it only after commit."""
-    db.info.setdefault("rag_sync_events", []).append({
+    """Persist an outbound RAG event with the originating business command.
+
+    The outbox row is part of the caller's transaction. A separate worker owns
+    retries, which means an n8n outage cannot silently discard a committed ERP
+    change.
+    """
+    settings = get_settings()
+    # RAG is optional. When the integration is deliberately disabled there is
+    # no useful delivery target to accumulate in the outbox.
+    if not settings.rag_sync_webhook_url or not settings.rag_sync_webhook_secret:
+        return
+    event = {
         "tenant_id": str(tenant_id), "module": module, "entity": entity,
         "entity_id": str(entity_id) if entity_id else None, "action": action,
         "occurred_at": datetime.utcnow().isoformat() + "Z",
-    })
+    }
+    db.execute(
+        text("""
+            insert into outbox_events(tenant_id, topic, payload)
+            values (:tenant_id, 'rag.sync', cast(:payload as jsonb))
+        """),
+        {"tenant_id": str(tenant_id), "payload": json.dumps(event, separators=(",", ":"))},
+    )
 
 
 def signed_request(payload: dict[str, Any], secret: str) -> tuple[bytes, dict[str, str]]:
@@ -193,7 +209,7 @@ def signed_request(payload: dict[str, Any], secret: str) -> tuple[bytes, dict[st
 def dispatch_sync_event(event: dict[str, Any]) -> None:
     settings = get_settings()
     if not settings.rag_sync_webhook_url or not settings.rag_sync_webhook_secret:
-        return
+        raise RuntimeError("La integración RAG no está configurada")
     try:
         with httpx.Client(timeout=5) as client:
             body, headers = signed_request(event, settings.rag_sync_webhook_secret)
@@ -203,14 +219,5 @@ def dispatch_sync_event(event: dict[str, Any]) -> None:
                 headers=headers,
             ).raise_for_status()
     except Exception:
-        logger.warning("rag_sync_webhook_failed tenant_id=%s module=%s", event["tenant_id"], event["module"], exc_info=True)
-
-
-def dispatch_after_commit(session: Session) -> None:
-    events = session.info.pop("rag_sync_events", [])
-    for event in events:
-        threading.Thread(target=dispatch_sync_event, args=(event,), daemon=True).start()
-
-
-def clear_after_rollback(session: Session) -> None:
-    session.info.pop("rag_sync_events", None)
+        logger.warning("rag_sync_webhook_failed tenant_id=%s module=%s", event.get("tenant_id"), event.get("module"), exc_info=True)
+        raise

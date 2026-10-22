@@ -6,7 +6,10 @@ API REST multiempresa para ERP EnterpriseCloud, construida con FastAPI, PostgreS
 
 1. Copia `.env.example` como `.env` y completa las variables.
 2. Instala dependencias: `py -m pip install -r requirements.txt`.
-3. Ejecuta la migración SQL `alembic/versions/0001_initial_schema.sql` en el SQL Editor de Supabase o con `psql`.
+3. Ejecuta **todas** las migraciones SQL de `alembic/versions/` en orden
+   numérico, desde `0001_initial_schema.sql` hasta la última disponible. Una
+   instalación nueva que ejecute solo la migración inicial quedará sin módulos,
+   políticas RLS y controles incorporados posteriormente.
 4. Inicia el servidor: `py -m uvicorn app.main:app --reload`.
 
 La API queda disponible en `/docs`; el chequeo básico en `/health` y el de disponibilidad con base de datos en `/ready`. Los recursos disponibles inicialmente son clientes, proveedores, categorías, productos, almacenes, inventario, compras, ventas, pagos, documentos y dashboard.
@@ -30,6 +33,40 @@ Envía `Authorization: Bearer <access_token_de_supabase>` y `X-Tenant-ID: <uuid>
 Usa el Dockerfile, define el comando por defecto y configura `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_JWT_ISSUER`, `SUPABASE_JWKS_URL` (o `SUPABASE_JWT_SECRET`) y `CORS_ORIGINS` como variables privadas. No agregues una service-role key al frontend.
 
 Para la carga de documentos, añade también `SUPABASE_SERVICE_ROLE_KEY` solo en Render. La API usa esta clave internamente para escribir en el bucket privado `erp-documents`; no debe enviarse al navegador.
+
+## Idempotencia de comandos críticos
+
+Las rutas `POST /api/v1/sales`, `POST /api/v1/purchases`,
+`POST /api/v1/payments`, `POST /api/v1/inventory/adjustments` y
+  `POST /api/v1/inventory/transfers`, los commits de importación y la emisión
+  de comprobantes electrónicos, además de reservas, conteos físicos y sus
+  transiciones de transferencia, aceptan opcionalmente el encabezado
+`Idempotency-Key`. El cliente debe enviar un UUID u otro valor aleatorio estable
+por intento de operación y reutilizarlo únicamente si necesita reintentar
+exactamente el mismo payload después de un timeout o pérdida de red.
+
+- La misma clave, usuario, empresa y payload devuelve el resultado original sin
+  repetir la venta ni el pago.
+- Reutilizar la clave con datos diferentes devuelve `409 Conflict`.
+- Las claves se persisten junto con el comando y no se exponen por la Data API.
+
+La emisión frente a APISUNAT conserva este contrato para los reintentos del
+navegador. La entrega durable al proveedor se implementará como un consumidor
+de outbox: un proveedor externo puede confirmar el documento y cortar la
+conexión antes de que el servidor reciba su respuesta, caso que no puede
+resolverse de forma segura con un reintento HTTP directo.
+
+## Outbox y sincronización RAG
+
+Los cambios que alimentan al asistente se guardan primero en la tabla
+`outbox_events`, dentro de la misma transacción que el dato empresarial. El
+proceso `python -m app.workers.outbox` entrega posteriormente los eventos a
+n8n, con reintentos acotados y estado `dead` si no logra entregarlos.
+
+En Render debe configurarse como **Background Worker** separado de la API,
+usando la misma imagen, `DATABASE_URL` y secretos `RAG_*`. No se debe ejecutar
+este proceso dentro del servidor web ni habilitarlo hasta ejecutar la migración
+`0035_transactional_outbox.sql`.
 
 ## Consola de proveedor
 

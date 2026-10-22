@@ -1,6 +1,6 @@
 from decimal import Decimal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.stock import change_stock
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
@@ -229,7 +230,17 @@ def receive_serials(data: InventorySerialReceive, actor: Actor = Depends(require
 
 
 @router.post("/adjustments", response_model=InventoryMovementOut, status_code=status.HTTP_201_CREATED)
-def adjust_stock(data: StockAdjustment, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="inventory.adjustments.create",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     product = db.scalar(select(Product).where(Product.id == data.product_id, Product.tenant_id == actor.tenant_id, Product.is_active.is_(True)))
     warehouse = db.scalar(select(Warehouse).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
     if not product or not warehouse:
@@ -244,13 +255,30 @@ def adjust_stock(data: StockAdjustment, actor: Actor = Depends(require_permissio
     movement = InventoryMovement(tenant_id=actor.tenant_id, product_id=data.product_id, warehouse_id=data.warehouse_id, movement_type="adjustment", quantity=data.quantity, reference=data.reference, note=data.note)
     db.add(movement)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="adjust", module="inventory", entity="inventory_movement", entity_id=movement.id)
+    db.flush()
+    complete_idempotency(
+        db,
+        claim=idempotency,
+        response_body=InventoryMovementOut.model_validate(movement).model_dump(mode="json"),
+        response_status=status.HTTP_201_CREATED,
+    )
     db.commit()
     db.refresh(movement)
     return movement
 
 
 @router.post("/transfers", response_model=InventoryTransferOut, status_code=status.HTTP_201_CREATED)
-def transfer_stock(data: InventoryTransferCreate, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def transfer_stock(request: Request, data: InventoryTransferCreate, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="inventory.transfers.create",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     product = db.scalar(select(Product.id).where(Product.id == data.product_id, Product.tenant_id == actor.tenant_id, Product.is_active.is_(True)))
     warehouses = set(db.scalars(select(Warehouse.id).where(Warehouse.id.in_({data.source_warehouse_id, data.destination_warehouse_id}), Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True))).all())
     if not product or warehouses != {data.source_warehouse_id, data.destination_warehouse_id}:
@@ -262,6 +290,12 @@ def transfer_stock(data: InventoryTransferCreate, actor: Actor = Depends(require
     try:
         db.flush()
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body=InventoryTransferOut.model_validate(transfer).model_dump(mode="json"),
+            response_status=status.HTTP_201_CREATED,
+        )
         db.commit()
     except HTTPException:
         db.rollback()
@@ -289,7 +323,14 @@ def list_transfers(
 
 
 @router.post("/transfers/{transfer_id}/dispatch", response_model=InventoryTransferOut)
-def dispatch_transfer(transfer_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def dispatch_transfer(transfer_id: UUID, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.transfers.dispatch", key=request.headers.get("Idempotency-Key"),
+        payload={"transfer_id": str(transfer_id)},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     transfer = db.scalar(select(InventoryTransfer).where(
         InventoryTransfer.id == transfer_id,
         InventoryTransfer.tenant_id == actor.tenant_id,
@@ -302,6 +343,7 @@ def dispatch_transfer(transfer_id: UUID, actor: Actor = Depends(require_permissi
         transfer.status = "in_transit"
         db.execute(__import__("sqlalchemy").text("update inventory_transfers set dispatched_by=:actor, dispatched_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="dispatch_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+        complete_idempotency(db, claim=idempotency, response_body=InventoryTransferOut.model_validate(transfer).model_dump(mode="json"), response_status=status.HTTP_200_OK)
         db.commit()
     except HTTPException:
         db.rollback()
@@ -311,7 +353,14 @@ def dispatch_transfer(transfer_id: UUID, actor: Actor = Depends(require_permissi
 
 
 @router.post("/transfers/{transfer_id}/receive", response_model=InventoryTransferOut)
-def receive_transfer(transfer_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def receive_transfer(transfer_id: UUID, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation="inventory.transfers.receive", key=request.headers.get("Idempotency-Key"),
+        payload={"transfer_id": str(transfer_id)},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     transfer = db.scalar(select(InventoryTransfer).where(
         InventoryTransfer.id == transfer_id,
         InventoryTransfer.tenant_id == actor.tenant_id,
@@ -323,6 +372,7 @@ def receive_transfer(transfer_id: UUID, actor: Actor = Depends(require_permissio
     transfer.status = "completed"
     db.execute(__import__("sqlalchemy").text("update inventory_transfers set received_by=:actor, received_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+    complete_idempotency(db, claim=idempotency, response_body=InventoryTransferOut.model_validate(transfer).model_dump(mode="json"), response_status=status.HTTP_200_OK)
     db.commit()
     db.refresh(transfer)
     return transfer

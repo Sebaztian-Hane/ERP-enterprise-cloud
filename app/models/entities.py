@@ -35,6 +35,46 @@ class TenantMembership(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class LegalEntity(TimestampedTenantModel):
+    """A taxpayer/legal issuer inside a SaaS tenant.
+
+    A tenant is the data-isolation boundary; it is not necessarily the company
+    that issues a Peruvian fiscal document.  Keeping this distinction explicit
+    prevents future CPE numbering and tax configuration from leaking between
+    legal entities that share one ERP subscription.
+    """
+
+    __tablename__ = "legal_entities"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code"),
+        UniqueConstraint("tenant_id", "tax_id"),
+        Index("ix_legal_entities_tenant_active", "tenant_id", "is_active"),
+    )
+    code: Mapped[str] = mapped_column(String(24), nullable=False)
+    legal_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    trade_name: Mapped[str | None] = mapped_column(String(200))
+    tax_id: Mapped[str] = mapped_column(String(16), nullable=False)
+    tax_regime: Mapped[str | None] = mapped_column(String(80))
+    fiscal_address: Mapped[str] = mapped_column(Text, nullable=False)
+    ubigeo: Mapped[str | None] = mapped_column(String(6))
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Branch(TimestampedTenantModel):
+    __tablename__ = "branches"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "legal_entity_id", "code"),
+        Index("ix_branches_tenant_entity_active", "tenant_id", "legal_entity_id", "is_active"),
+    )
+    legal_entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("legal_entities.id"), nullable=False)
+    code: Mapped[str] = mapped_column(String(24), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    address: Mapped[str | None] = mapped_column(Text)
+    ubigeo: Mapped[str | None] = mapped_column(String(6))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class TenantModuleSetting(Base):
     __tablename__ = "tenant_module_settings"
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
@@ -118,6 +158,7 @@ class Warehouse(TimestampedTenantModel):
     code: Mapped[str] = mapped_column(String(40), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     address: Mapped[str | None] = mapped_column(Text)
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("branches.id"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.services.apisunat import APISunatError, build_document_body, get_docume
 from app.services.traceability import issue_tracked_stock, return_tracked_sale_stock
 from app.services.decolecta import DecolectaError, lookup_tax_id
 from app.services.accounting import post_entry, reverse_entry, split_tax
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -75,7 +76,17 @@ def get_electronic_document(sale_id: str, actor: Actor = Depends(require_permiss
 
 
 @router.post("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut, status_code=status.HTTP_201_CREATED)
-def issue_electronic_document(sale_id: str, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+def issue_electronic_document(sale_id: str, request: Request, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation=f"electronic_billing.issue.{sale_id}",
+        key=request.headers.get("Idempotency-Key"),
+        payload={"sale_id": sale_id, **data.model_dump(mode="json")},
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     sale, existing = _electronic_document(sale_id, actor, db)
     if sale.status != "posted":
         raise HTTPException(status_code=409, detail="Solo se pueden emitir comprobantes de ventas procesadas")
@@ -108,12 +119,19 @@ def issue_electronic_document(sale_id: str, data: ElectronicDocumentCreate, acto
         if not response.get("documentId"):
             raise APISunatError("APISUNAT no devolvió el identificador del comprobante")
     except APISunatError as exc:
+        db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     document = ElectronicDocument(tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type, series=series, correlative=correlative, file_name=file_name, status=_provider_status(response.get("status")), provider_document_id=response.get("documentId"), taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total, provider_payload=response)
     db.add(document)
     db.flush()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="issue", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=f"{file_name} · {response.get('status', 'PENDIENTE')}")
+    complete_idempotency(
+        db,
+        claim=idempotency,
+        response_body=ElectronicDocumentOut.model_validate(document).model_dump(mode="json"),
+        response_status=status.HTTP_201_CREATED,
+    )
     db.commit()
     db.refresh(document)
     return document
@@ -159,7 +177,17 @@ def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: 
 
 
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
-def post_sale(data: SaleCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="sales.create",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     customer_id = data.customer_id
     if data.customer:
         existing = db.scalar(select(Customer).where(Customer.tenant_id == actor.tenant_id, Customer.tax_id == data.customer.tax_id).with_for_update())
@@ -206,6 +234,12 @@ def post_sale(data: SaleCreate, actor: Actor = Depends(require_permission("sales
         net, tax = split_tax(total)
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Venta {data.number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body=SaleOut.model_validate(sale).model_dump(mode="json"),
+            response_status=status.HTTP_201_CREATED,
+        )
         db.commit()
     except HTTPException:
         db.rollback()

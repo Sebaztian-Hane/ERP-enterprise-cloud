@@ -10,6 +10,7 @@ from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
 from app.services.accounting import post_entry
+from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
@@ -44,6 +45,16 @@ def list_payments(
 @router.post("", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("20/minute")
 def create_payment(request: Request, response: Response, data: PaymentCreate, actor: Actor = Depends(require_permission("payments:write")), db: Session = Depends(get_db)):
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="payments.create",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
     # A mobile connection can disappear after the database commits but before
     # the browser receives the response.  The user-visible number is therefore
     # an idempotency key for an otherwise identical retry.
@@ -84,6 +95,12 @@ def create_payment(request: Request, response: Response, data: PaymentCreate, ac
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="payments", entity="payment", entity_id=payment.id)
         db.execute(__import__("sqlalchemy").text("insert into cash_movements(tenant_id,cash_account_id,payment_id,movement_type,amount,reference) values(:tenant,:account,:payment,:type,:amount,:reference)"), {"tenant":str(actor.tenant_id),"account":str(data.cash_account_id),"payment":str(payment.id),"type":"inflow" if data.payment_type=="receipt" else "outflow","amount":data.amount,"reference":data.number})
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"{'Cobro' if data.payment_type == 'receipt' else 'Pago'} {data.number}", source_type="payment", source_id=payment.id, lines=[("1010", data.amount if data.payment_type == "receipt" else Decimal("0"), data.amount if data.payment_type == "payment" else Decimal("0")), ("1210" if data.payment_type == "receipt" else "4210", Decimal("0") if data.payment_type == "receipt" else data.amount, data.amount if data.payment_type == "receipt" else Decimal("0"))])
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body=PaymentOut.model_validate(payment).model_dump(mode="json"),
+            response_status=status.HTTP_201_CREATED,
+        )
         db.commit()
     except HTTPException:
         db.rollback()
