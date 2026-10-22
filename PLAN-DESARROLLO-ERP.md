@@ -119,12 +119,14 @@ operaciones repetidas; eventos recuperables después de reiniciar un proceso.
 **Objetivo:** separar correctamente la plataforma SaaS de las entidades que
 operan y tributan.
 
-**Avance actual:** se incorporó el maestro de entidades legales (RUC, régimen,
-dirección fiscal) y sucursales, asociado al `tenant_id`. Los almacenes ya
-admiten una futura asociación a sucursal. Todavía falta hacer obligatoria esa
-selección en documentos, secuencias y configuración fiscal.
+**Avance actual:** el maestro de entidades legales (RUC, régimen, dirección
+fiscal) y sucursales está asociado al `tenant_id`, se administra desde
+Configuración y los almacenes se vinculan a una sucursal validada del mismo
+tenant. No se permite desactivar una entidad con sucursales activas ni una
+sucursal con almacenes activos. Todavía falta hacer obligatoria esa selección
+en documentos, secuencias y configuración fiscal.
 
-- [ ] Modelar entidad legal, RUC, régimen, establecimiento/sucursal, dirección
+- [x] Modelar entidad legal, RUC, régimen, establecimiento/sucursal, dirección
       fiscal y almacén; relacionarlos con el tenant actual.
 - [ ] Alcanzar numeración por entidad legal, tipo documental, serie y
       establecimiento, no solo por tenant.
