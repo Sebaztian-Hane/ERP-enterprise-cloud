@@ -19,6 +19,8 @@ class VoidElectronicDocument(BaseModel):
 class ElectronicDocumentOut(ORMModel):
     id: UUID
     sale_id: UUID
+    legal_entity_id: UUID | None
+    branch_id: UUID | None
     document_type: str
     series: str
     correlative: str

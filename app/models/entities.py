@@ -230,6 +230,11 @@ class Sale(TimestampedTenantModel):
     number: Mapped[str] = mapped_column(String(40), nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    # Operational context is derived from the selected warehouse at posting time.
+    # It is stored on the document so later warehouse reconfiguration cannot
+    # alter the legal/audit context of an already posted transaction.
+    legal_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("legal_entities.id"))
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("branches.id"))
     status: Mapped[str] = mapped_column(String(24), default="posted", nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
@@ -253,6 +258,9 @@ class Purchase(TimestampedTenantModel):
     number: Mapped[str] = mapped_column(String(40), nullable=False)
     supplier_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("suppliers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    # See Sale: these are immutable posting-time operational references.
+    legal_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("legal_entities.id"))
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("branches.id"))
     status: Mapped[str] = mapped_column(String(24), default="received", nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
@@ -286,6 +294,8 @@ class ElectronicDocument(TimestampedTenantModel):
     )
 
     sale_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sales.id"), nullable=False)
+    legal_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("legal_entities.id"))
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("branches.id"))
     document_type: Mapped[str] = mapped_column(String(8), nullable=False)
     series: Mapped[str] = mapped_column(String(8), nullable=False)
     correlative: Mapped[str] = mapped_column(String(16), nullable=False)

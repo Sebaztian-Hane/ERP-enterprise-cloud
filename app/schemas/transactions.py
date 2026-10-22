@@ -67,6 +67,8 @@ class SaleOut(ORMModel):
     number: str
     customer_id: UUID
     warehouse_id: UUID
+    legal_entity_id: UUID | None
+    branch_id: UUID | None
     status: str
     total: Decimal
     note: str | None
@@ -123,6 +125,8 @@ class PurchaseOut(ORMModel):
     number: str
     supplier_id: UUID
     warehouse_id: UUID
+    legal_entity_id: UUID | None
+    branch_id: UUID | None
     status: str
     total: Decimal
     note: str | None

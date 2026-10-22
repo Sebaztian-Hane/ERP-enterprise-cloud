@@ -123,11 +123,15 @@ operan y tributan.
 fiscal) y sucursales está asociado al `tenant_id`, se administra desde
 Configuración y los almacenes se vinculan a una sucursal validada del mismo
 tenant. No se permite desactivar una entidad con sucursales activas ni una
-sucursal con almacenes activos. Todavía falta hacer obligatoria esa selección
-en documentos, secuencias y configuración fiscal.
+sucursal con almacenes activos. Ventas, compras y CPE ya guardan el contexto
+derivado del almacén; la base de datos también valida que entidad, sucursal y
+tenant sean coherentes. Falta llevar la numeración y la configuración fiscal a
+ese mismo alcance.
 
 - [x] Modelar entidad legal, RUC, régimen, establecimiento/sucursal, dirección
       fiscal y almacén; relacionarlos con el tenant actual.
+- [x] Derivar y persistir entidad legal/sucursal en ventas, compras y CPE, sin
+      permitir enlaces cruzados entre tenants.
 - [ ] Alcanzar numeración por entidad legal, tipo documental, serie y
       establecimiento, no solo por tenant.
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de

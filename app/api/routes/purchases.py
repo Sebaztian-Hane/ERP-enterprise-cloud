@@ -13,6 +13,7 @@ from app.services.audit import record
 from app.services.traceability import receive_tracked_stock, reverse_tracked_purchase_receipt
 from app.services.accounting import post_entry, reverse_entry, split_tax
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
+from app.services.operational_context import resolve_warehouse_context
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -52,14 +53,18 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
     if idempotency and idempotency.is_replay:
         return replay_response(idempotency)
     supplier = db.scalar(select(Supplier.id).where(Supplier.id == data.supplier_id, Supplier.tenant_id == actor.tenant_id, Supplier.is_active.is_(True)))
-    warehouse = db.scalar(select(Warehouse.id).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
+    operational_context = resolve_warehouse_context(
+        db, tenant_id=actor.tenant_id, warehouse_id=data.warehouse_id,
+    )
     product_ids = {line.product_id for line in data.lines}
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
-    if not supplier or not warehouse or products != product_ids:
+    if not supplier or products != product_ids:
         raise HTTPException(status_code=404, detail="Proveedor, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_cost for line in data.lines), Decimal("0"))
     purchase = Purchase(
         tenant_id=actor.tenant_id, number=data.number, supplier_id=data.supplier_id, warehouse_id=data.warehouse_id,
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
         status="received", total=total, note=data.note, supplier_document_type=data.supplier_document_type,
         supplier_document_series=data.supplier_document_series, supplier_document_number=data.supplier_document_number,
         supplier_document_date=datetime.combine(data.supplier_document_date, time.min, tzinfo=timezone.utc) if data.supplier_document_date else None,

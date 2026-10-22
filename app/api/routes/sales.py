@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
-from app.models.entities import AccountReceivable, Customer, ElectronicDocument, Product, Sale, SaleItem, Warehouse
+from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, LegalEntity, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
@@ -19,6 +19,7 @@ from app.services.electronic_delivery import provider_status
 from app.services.accounting import post_entry, reverse_entry, split_tax
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.outbox import enqueue
+from app.services.operational_context import resolve_warehouse_context
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -89,6 +90,35 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
         raise HTTPException(status_code=409, detail="Solo se pueden emitir comprobantes de ventas procesadas")
     if existing:
         raise HTTPException(status_code=409, detail="Esta venta ya tiene un comprobante electrónico")
+    if not sale.legal_entity_id or not sale.branch_id:
+        raise HTTPException(
+            status_code=422,
+            detail="La venta no tiene entidad legal y sucursal. Configura la sucursal del almacén y registra una nueva venta antes de facturar",
+        )
+    legal_entity = db.scalar(select(LegalEntity).where(
+        LegalEntity.id == sale.legal_entity_id,
+        LegalEntity.tenant_id == actor.tenant_id,
+        LegalEntity.is_active.is_(True),
+    ))
+    branch = db.scalar(select(Branch).where(
+        Branch.id == sale.branch_id,
+        Branch.tenant_id == actor.tenant_id,
+        Branch.legal_entity_id == sale.legal_entity_id,
+        Branch.is_active.is_(True),
+    ))
+    if legal_entity is None or branch is None:
+        raise HTTPException(
+            status_code=422,
+            detail="La entidad legal y sucursal son obligatorias para emitir un comprobante electrónico",
+        )
+    # A single APISUNAT persona is configured for this installation. Do not
+    # create a document that claims a different issuer than that credential.
+    settings = get_settings()
+    if legal_entity.tax_id != (settings.apisunat_issuer_ruc or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="La credencial APISUNAT configurada corresponde a otra entidad legal; configura una persona compatible antes de emitir",
+        )
     customer = db.scalar(select(Customer).where(Customer.id == sale.customer_id, Customer.tenant_id == actor.tenant_id))
     items = db.execute(select(SaleItem, Product).join(Product, Product.id == SaleItem.product_id).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
     if not customer or not items:
@@ -98,7 +128,6 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
         raise HTTPException(status_code=422, detail="Para emitir Factura el cliente debe tener un RUC de 11 dígitos")
     if data.document_type == "03" and (len(tax_id) not in {8, 11} or not tax_id.isdigit()):
         raise HTTPException(status_code=422, detail="Para emitir Boleta el cliente debe tener DNI de 8 dígitos o RUC de 11 dígitos")
-    settings = get_settings()
     series = settings.apisunat_invoice_series if data.document_type == "01" else settings.apisunat_receipt_series
     try:
         correlative = next_correlative(settings, data.document_type, series)
@@ -112,7 +141,12 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     body = build_document_body(
         sale_number=sale.number, issue_date=issue_date, issue_time=issue_time,
         document_type=data.document_type, series=series, correlative=correlative,
-        issuer={"ruc": settings.apisunat_issuer_ruc or "", "trade_name": settings.apisunat_issuer_trade_name or "", "legal_name": settings.apisunat_issuer_legal_name or "", "address": settings.apisunat_issuer_address or ""},
+        issuer={
+            "ruc": legal_entity.tax_id,
+            "trade_name": legal_entity.trade_name or legal_entity.legal_name,
+            "legal_name": legal_entity.legal_name,
+            "address": branch.address or legal_entity.fiscal_address,
+        },
         customer={"tax_id": tax_id, "name": customer.name, "address": ""},
         lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit, "description": product.name} for item, product in items],
         total=sale.total,
@@ -121,14 +155,22 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     # the outbox event. The web request never crosses the provider boundary.
     # This removes the ambiguous "provider accepted but HTTP timed out" case.
     document = ElectronicDocument(
-        tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type,
+        tenant_id=actor.tenant_id, sale_id=sale.id,
+        legal_entity_id=sale.legal_entity_id, branch_id=sale.branch_id, document_type=data.document_type,
         series=series, correlative=correlative, file_name=file_name, status="reserved",
         taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total,
         provider_payload={
             "submission": {
                 "document_body": body,
                 "customer_email": customer.email or None,
-            }
+            },
+            "issuer_snapshot": {
+                "legal_entity_id": str(legal_entity.id),
+                "branch_id": str(branch.id),
+                "tax_id": legal_entity.tax_id,
+                "legal_name": legal_entity.legal_name,
+                "branch_name": branch.name,
+            },
         },
     )
     db.add(document)
@@ -233,13 +275,21 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             customer_id = customer.id
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_from_sale", module="customers", entity="customer", entity_id=customer.id, detail=f"Cliente creado durante venta: {data.customer.tax_id}")
     customer = db.scalar(select(Customer.id).where(Customer.id == customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True)))
-    warehouse = db.scalar(select(Warehouse.id).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
+    operational_context = resolve_warehouse_context(
+        db, tenant_id=actor.tenant_id, warehouse_id=data.warehouse_id,
+    )
     product_ids = {line.product_id for line in data.lines}
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
-    if not customer or not warehouse or products != product_ids:
+    if not customer or products != product_ids:
         raise HTTPException(status_code=404, detail="Cliente, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_price for line in data.lines), Decimal("0"))
-    sale = Sale(tenant_id=actor.tenant_id, number=data.number, customer_id=customer_id, warehouse_id=data.warehouse_id, status="posted", total=total, note=data.note)
+    sale = Sale(
+        tenant_id=actor.tenant_id, number=data.number, customer_id=customer_id,
+        warehouse_id=data.warehouse_id,
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
+        status="posted", total=total, note=data.note,
+    )
     db.add(sale)
     try:
         db.flush()
