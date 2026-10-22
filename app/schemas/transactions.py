@@ -45,7 +45,9 @@ class SaleCustomerCreate(BaseModel):
 
 
 class SaleCreate(BaseModel):
-    number: str = Field(min_length=1, max_length=40)
+    # Retained as optional input only for older clients. The ERP now assigns
+    # sales and purchases a server-side, scoped operational folio.
+    number: str | None = Field(default=None, min_length=1, max_length=40)
     customer_id: UUID | None = None
     customer: SaleCustomerCreate | None = None
     warehouse_id: UUID
@@ -101,7 +103,7 @@ class PurchaseLineCreate(BaseModel):
 
 
 class PurchaseCreate(BaseModel):
-    number: str = Field(min_length=1, max_length=40)
+    number: str | None = Field(default=None, min_length=1, max_length=40)
     supplier_id: UUID
     warehouse_id: UUID
     lines: list[PurchaseLineCreate] = Field(min_length=1)

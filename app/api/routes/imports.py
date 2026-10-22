@@ -41,6 +41,7 @@ from app.security.auth import Actor, require_owner_or_admin
 from app.services.accounting import post_entry, split_tax
 from app.services.audit import record
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
+from app.services.operational_context import resolve_warehouse_context
 from app.services.stock import change_stock
 
 router = APIRouter(prefix="/imports", tags=["imports"])
@@ -338,8 +339,17 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
             raise HTTPException(status_code=422, detail=f"El documento {number} repite un SKU")
         counterpart = _get_or_create_counterpart(module, first, actor, db)
         total = sum((line["quantity"] * line["unit_value"] for line in lines), Decimal("0"))
+        operational_context = resolve_warehouse_context(
+            db, tenant_id=actor.tenant_id, warehouse_id=warehouse.id,
+        )
         if module == "sales":
-            sale = Sale(tenant_id=actor.tenant_id, number=number, customer_id=counterpart.id, warehouse_id=warehouse.id, status="posted", total=total, note=first["note"])
+            sale = Sale(
+                tenant_id=actor.tenant_id, number=number, customer_id=counterpart.id,
+                warehouse_id=warehouse.id,
+                legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+                branch_id=operational_context.branch.id if operational_context.branch else None,
+                status="posted", total=total, note=first["note"],
+            )
             db.add(sale); db.flush()
             db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=counterpart.id, original_amount=total, balance_amount=total, status="open", due_date=first["due_date"] or date.today()))
             for line in lines:
@@ -350,7 +360,13 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
             post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta importada {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="sales", entity="sale", entity_id=sale.id)
         else:
-            purchase = Purchase(tenant_id=actor.tenant_id, number=number, supplier_id=counterpart.id, warehouse_id=warehouse.id, status="received", total=total, note=first["note"])
+            purchase = Purchase(
+                tenant_id=actor.tenant_id, number=number, supplier_id=counterpart.id,
+                warehouse_id=warehouse.id,
+                legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+                branch_id=operational_context.branch.id if operational_context.branch else None,
+                status="received", total=total, note=first["note"],
+            )
             db.add(purchase); db.flush()
             db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=counterpart.id, original_amount=total, balance_amount=total, status="open", due_date=first["due_date"] or date.today()))
             for line in lines:

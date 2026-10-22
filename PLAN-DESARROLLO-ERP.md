@@ -132,8 +132,9 @@ ese mismo alcance.
       fiscal y almacén; relacionarlos con el tenant actual.
 - [x] Derivar y persistir entidad legal/sucursal en ventas, compras y CPE, sin
       permitir enlaces cruzados entre tenants.
-- [ ] Alcanzar numeración por entidad legal, tipo documental, serie y
-      establecimiento, no solo por tenant.
+- [x] Alcanzar numeración operativa de ventas/compras por entidad legal,
+      establecimiento y tipo documental; los correlativos fiscales permanecen
+      a cargo del proveedor CPE hasta configurar series por establecimiento.
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de
       precio, condiciones de pago y políticas de descuento.
 - [ ] Definir centros de costo/dimensiones contables y su validación por rol.

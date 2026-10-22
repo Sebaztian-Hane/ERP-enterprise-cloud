@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
@@ -81,6 +81,25 @@ class TenantModuleSetting(Base):
     module_code: Mapped[str] = mapped_column(String(50), primary_key=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class DocumentSequence(Base):
+    """Tenant-safe operational document numbering configuration.
+
+    CPE series/correlatives remain controlled by the external fiscal provider;
+    these sequences identify the ERP's sale and purchase documents.
+    """
+
+    __tablename__ = "document_sequences"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    legal_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("legal_entities.id"))
+    branch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("branches.id"))
+    module: Mapped[str] = mapped_column(String(40), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    prefix: Mapped[str | None] = mapped_column(String(16))
+    next_number: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class MembershipModuleSetting(Base):

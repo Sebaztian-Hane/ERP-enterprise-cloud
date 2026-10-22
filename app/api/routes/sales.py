@@ -20,6 +20,7 @@ from app.services.accounting import post_entry, reverse_entry, split_tax
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.outbox import enqueue
 from app.services.operational_context import resolve_warehouse_context
+from app.services.document_sequences import allocate_document_number
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -283,8 +284,13 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     if not customer or products != product_ids:
         raise HTTPException(status_code=404, detail="Cliente, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_price for line in data.lines), Decimal("0"))
+    number = allocate_document_number(
+        db, tenant_id=actor.tenant_id, module="sales", document_type="sale",
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
+    )
     sale = Sale(
-        tenant_id=actor.tenant_id, number=data.number, customer_id=customer_id,
+        tenant_id=actor.tenant_id, number=number, customer_id=customer_id,
         warehouse_id=data.warehouse_id,
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
         branch_id=operational_context.branch.id if operational_context.branch else None,
