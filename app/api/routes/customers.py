@@ -40,7 +40,7 @@ def create_customer(data: CustomerCreate, actor: Actor = Depends(require_permiss
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="El código de cliente ya existe en esta empresa") from exc
+        raise HTTPException(status_code=409, detail="Ya existe un cliente con ese código o DNI/RUC en esta empresa") from exc
     db.refresh(customer)
     return customer
 
@@ -57,6 +57,6 @@ def update_customer(customer_id: UUID, data: CustomerUpdate, actor: Actor = Depe
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="El código de cliente ya existe en esta empresa") from exc
+        raise HTTPException(status_code=409, detail="Ya existe un cliente con ese código o DNI/RUC en esta empresa") from exc
     db.refresh(customer)
     return customer

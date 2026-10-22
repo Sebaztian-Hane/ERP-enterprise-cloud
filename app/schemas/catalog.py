@@ -13,6 +13,16 @@ class CustomerCreate(BaseModel):
     tax_id: str | None = None
     credit_limit: Decimal = Field(default=Decimal("0"), ge=0)
 
+    @field_validator("tax_id")
+    @classmethod
+    def validate_document(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip()
+        if not normalized.isdigit() or len(normalized) not in {8, 11}:
+            raise ValueError("El documento debe ser DNI de 8 dígitos o RUC de 11 dígitos")
+        return normalized
+
 
 class CustomerOut(CustomerCreate, ORMModel):
     id: UUID
@@ -27,6 +37,16 @@ class CustomerUpdate(BaseModel):
     tax_id: str | None = None
     credit_limit: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
+
+    @field_validator("tax_id")
+    @classmethod
+    def validate_document(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip()
+        if not normalized.isdigit() or len(normalized) not in {8, 11}:
+            raise ValueError("El documento debe ser DNI de 8 dígitos o RUC de 11 dígitos")
+        return normalized
 
 
 class CategoryCreate(BaseModel):
