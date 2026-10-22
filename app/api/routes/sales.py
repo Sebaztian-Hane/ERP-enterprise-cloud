@@ -25,6 +25,7 @@ from app.services.document_sequences import allocate_document_number
 from app.services.payment_terms import resolve_payment_term
 from app.services.taxes import resolve_default_tax_rate
 from app.services.cost_centers import resolve_cost_center
+from app.services.apisunat_credentials import resolve_apisunat_credentials
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -213,14 +214,10 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
             status_code=422,
             detail="La entidad legal y sucursal son obligatorias para emitir un comprobante electrónico",
         )
-    # A single APISUNAT persona is configured for this installation. Do not
-    # create a document that claims a different issuer than that credential.
     settings = get_settings()
-    if legal_entity.tax_id != (settings.apisunat_issuer_ruc or "").strip():
-        raise HTTPException(
-            status_code=422,
-            detail="La credencial APISUNAT configurada corresponde a otra entidad legal; configura una persona compatible antes de emitir",
-        )
+    credentials = resolve_apisunat_credentials(
+        db, tenant_id=actor.tenant_id, legal_entity_id=legal_entity.id, issuer_ruc=legal_entity.tax_id,
+    )
     customer = db.scalar(select(Customer).where(Customer.id == sale.customer_id, Customer.tenant_id == actor.tenant_id))
     items = db.execute(select(SaleItem, Product).join(Product, Product.id == SaleItem.product_id).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
     if not customer or not items:
@@ -230,9 +227,12 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
         raise HTTPException(status_code=422, detail="Para emitir Factura el cliente debe tener un RUC de 11 dígitos")
     if data.document_type == "03" and (len(tax_id) not in {8, 11} or not tax_id.isdigit()):
         raise HTTPException(status_code=422, detail="Para emitir Boleta el cliente debe tener DNI de 8 dígitos o RUC de 11 dígitos")
-    series = settings.apisunat_invoice_series if data.document_type == "01" else settings.apisunat_receipt_series
+    series = credentials.invoice_series if data.document_type == "01" else credentials.receipt_series
     try:
-        correlative = next_correlative(settings, data.document_type, series)
+        correlative = next_correlative(
+            settings, data.document_type, series,
+            persona_id=credentials.persona_id, persona_token=credentials.persona_token,
+        )
     except APISunatError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -245,7 +245,7 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     taxable = sale.taxable_amount or (sale.total / (Decimal("1") + tax_rate_percent / Decimal("100"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     now = datetime.now(timezone.utc)
     issue_date, issue_time = now.date().isoformat(), now.strftime("%H:%M:%S")
-    file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
+    file_name = f"{credentials.issuer_ruc}-{data.document_type}-{series}-{correlative}"
     body = build_document_body(
         sale_number=sale.number, issue_date=issue_date, issue_time=issue_time,
         document_type=data.document_type, series=series, correlative=correlative,
@@ -277,6 +277,8 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
                 "legal_entity_id": str(legal_entity.id),
                 "branch_id": str(branch.id),
                 "tax_id": legal_entity.tax_id,
+                "credential_id": str(credentials.id) if credentials.id else None,
+                "credential_source": credentials.source,
                 "legal_name": legal_entity.legal_name,
                 "branch_name": branch.name,
             },
@@ -340,7 +342,21 @@ def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: 
     if document.status in {"void_pending", "voided"}:
         raise HTTPException(status_code=409, detail="El comprobante ya está en proceso de anulación o anulado")
     try:
-        response = void_bill(get_settings(), document.provider_document_id, data.reason)
+        if not document.legal_entity_id:
+            raise HTTPException(status_code=422, detail="El comprobante no tiene una entidad legal asociada")
+        legal_entity = db.scalar(select(LegalEntity).where(
+            LegalEntity.id == document.legal_entity_id,
+            LegalEntity.tenant_id == actor.tenant_id,
+        ))
+        if not legal_entity:
+            raise HTTPException(status_code=422, detail="No se encontró la entidad legal del comprobante")
+        credentials = resolve_apisunat_credentials(
+            db, tenant_id=actor.tenant_id, legal_entity_id=legal_entity.id, issuer_ruc=legal_entity.tax_id,
+        )
+        response = void_bill(
+            get_settings(), document.provider_document_id, data.reason,
+            persona_id=credentials.persona_id, persona_token=credentials.persona_token,
+        )
     except APISunatError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     document.status = "void_pending"

@@ -61,6 +61,30 @@ class LegalEntity(TimestampedTenantModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class EntityAPISunatCredential(TimestampedTenantModel):
+    """Encrypted APISUNAT access scoped to one taxpayer within one tenant.
+
+    The plaintext provider token deliberately never becomes an ORM attribute.
+    It is decrypted only in the server process immediately before an APISUNAT
+    request, and is not included in audit or provider payload snapshots.
+    """
+
+    __tablename__ = "entity_apisunat_credentials"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "legal_entity_id"),
+        Index("ix_entity_apisunat_credentials_tenant_entity_active", "tenant_id", "legal_entity_id", "is_active"),
+    )
+    legal_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("legal_entities.id", ondelete="CASCADE"), nullable=False,
+    )
+    issuer_ruc: Mapped[str] = mapped_column(String(11), nullable=False)
+    persona_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    persona_token_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    invoice_series: Mapped[str] = mapped_column(String(8), default="F001", nullable=False)
+    receipt_series: Mapped[str] = mapped_column(String(8), default="B001", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class Branch(TimestampedTenantModel):
     __tablename__ = "branches"
     __table_args__ = (

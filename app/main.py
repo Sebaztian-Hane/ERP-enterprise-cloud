@@ -27,7 +27,9 @@ async def lifespan(_: FastAPI):
     """
     stop_event = worker_thread = None
     has_rag_target = bool(settings.rag_sync_webhook_url and settings.rag_sync_webhook_secret)
-    has_cpe_target = bool(settings.apisunat_persona_id and settings.apisunat_persona_token)
+    # A per-entity CPE credential is resolved when an outbox event is handled.
+    # The worker therefore needs only the server encryption key to start.
+    has_cpe_target = bool(settings.credential_encryption_key or (settings.apisunat_persona_id and settings.apisunat_persona_token))
     if settings.outbox_embedded_worker_enabled and (has_rag_target or has_cpe_target):
         from app.workers.outbox import start_embedded_worker
 

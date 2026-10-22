@@ -30,19 +30,6 @@ def _json_number(value: Decimal | int | float) -> int | float:
     return float(decimal_value)
 
 
-def require_apisunat_config(settings: Settings) -> None:
-    required = (
-        settings.apisunat_persona_id,
-        settings.apisunat_persona_token,
-        settings.apisunat_issuer_ruc,
-        settings.apisunat_issuer_trade_name,
-        settings.apisunat_issuer_legal_name,
-        settings.apisunat_issuer_address,
-    )
-    if not all(required):
-        raise APISunatError("La facturación electrónica aún no está configurada en el servidor")
-
-
 def _under_thousand(number: int) -> str:
     ones = ("", "UNO", "DOS", "TRES", "CUATRO", "CINCO", "SEIS", "SIETE", "OCHO", "NUEVE")
     teens = ("DIEZ", "ONCE", "DOCE", "TRECE", "CATORCE", "QUINCE", "DIECISÉIS", "DIECISIETE", "DIECIOCHO", "DIECINUEVE")
@@ -165,9 +152,8 @@ def _post(settings: Settings, path: str, payload: dict[str, Any]) -> dict[str, A
     return data
 
 
-def next_correlative(settings: Settings, document_type: str, series: str) -> str:
-    require_apisunat_config(settings)
-    data = _post(settings, "/personas/lastDocument", {"personaId": settings.apisunat_persona_id, "personaToken": settings.apisunat_persona_token, "type": document_type, "serie": series})
+def next_correlative(settings: Settings, document_type: str, series: str, *, persona_id: str, persona_token: str) -> str:
+    data = _post(settings, "/personas/lastDocument", {"personaId": persona_id, "personaToken": persona_token, "type": document_type, "serie": series})
     value = str(data.get("suggestedNumber") or "")
     if not value.isdigit():
         raise APISunatError("APISUNAT no entregó un correlativo válido")
@@ -175,7 +161,6 @@ def next_correlative(settings: Settings, document_type: str, series: str) -> str
 
 
 def send_bill(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
-    require_apisunat_config(settings)
     return _post(settings, "/personas/v1/sendBill", payload)
 
 
@@ -192,6 +177,5 @@ def get_document(settings: Settings, document_id: str) -> dict[str, Any]:
     return data
 
 
-def void_bill(settings: Settings, document_id: str, reason: str) -> dict[str, Any]:
-    require_apisunat_config(settings)
-    return _post(settings, "/personas/v1/voidBill", {"personaId": settings.apisunat_persona_id, "personaToken": settings.apisunat_persona_token, "documentId": document_id, "reason": reason})
+def void_bill(settings: Settings, document_id: str, reason: str, *, persona_id: str, persona_token: str) -> dict[str, Any]:
+    return _post(settings, "/personas/v1/voidBill", {"personaId": persona_id, "personaToken": persona_token, "documentId": document_id, "reason": reason})

@@ -8,8 +8,9 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models.entities import ElectronicDocument
+from app.models.entities import ElectronicDocument, LegalEntity
 from app.services.apisunat import APISunatError, send_bill
+from app.services.apisunat_credentials import resolve_apisunat_credentials
 from app.services.audit import record
 
 
@@ -57,13 +58,30 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
         file_name = document.file_name
         document_body = submission["document_body"]
         customer_email = submission.get("customer_email")
+        if not document.legal_entity_id:
+            document.status = "unknown"
+            document.last_error = "El comprobante no tiene entidad legal; no puede enviarse al proveedor"
+            db.commit()
+            return
+        legal_entity = db.scalar(select(LegalEntity).where(
+            LegalEntity.id == document.legal_entity_id,
+            LegalEntity.tenant_id == tenant_id,
+        ))
+        if not legal_entity:
+            document.status = "unknown"
+            document.last_error = "No se encontró la entidad legal del comprobante"
+            db.commit()
+            return
+        credentials = resolve_apisunat_credentials(
+            db, tenant_id=tenant_id, legal_entity_id=legal_entity.id, issuer_ruc=legal_entity.tax_id,
+        )
         document.status = "submitted"
         db.commit()
 
     settings = get_settings()
     request_payload = {
-        "personaId": settings.apisunat_persona_id,
-        "personaToken": settings.apisunat_persona_token,
+        "personaId": credentials.persona_id,
+        "personaToken": credentials.persona_token,
         "fileName": file_name,
         "documentBody": document_body,
     }

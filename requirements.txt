@@ -11,3 +11,4 @@ email-validator==2.3.0
 pytest==8.4.2
 pytest-asyncio==1.2.0
 slowapi==0.1.9
+cryptography==50.0.2

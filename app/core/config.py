@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     apisunat_issuer_address: str | None = None
     apisunat_invoice_series: str = "F001"
     apisunat_receipt_series: str = "B001"
+    # Fernet key used exclusively by the API to encrypt each legal entity's
+    # APISUNAT token at rest. It is a Render secret, never a browser value.
+    credential_encryption_key: str | None = Field(default=None, repr=False)
     # DeColecta is used only to prefill customer data from DNI/RUC during sales.
     decolecta_base_url: AnyHttpUrl = "https://api.decolecta.com"
     decolecta_api_key: str | None = Field(default=None, repr=False)
