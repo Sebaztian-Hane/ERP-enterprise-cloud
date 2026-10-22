@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import signal
 import time
-from threading import Event
+from threading import Event, Thread
 from typing import Any
 
 from sqlalchemy import text
@@ -24,6 +24,7 @@ STOP = Event()
 POLL_SECONDS = 2
 BATCH_SIZE = 20
 MAX_ATTEMPTS = 10
+LEASE_SECONDS = 300
 
 
 def retry_delay_seconds(attempts: int) -> int:
@@ -34,6 +35,20 @@ def retry_delay_seconds(attempts: int) -> int:
 def claim_batch() -> list[dict[str, Any]]:
     """Lease currently available events without allowing worker races."""
     with SessionLocal() as db:
+        # A process can be interrupted after claiming a row and before it can
+        # persist the delivery result. Releasing only expired leases ensures
+        # those events are retried while an active worker keeps its lease.
+        db.execute(
+            text("""
+                update outbox_events
+                set status = 'pending', locked_at = null,
+                    available_at = now(),
+                    last_error = coalesce(last_error, 'Entrega interrumpida; evento recuperado')
+                where status = 'processing'
+                  and locked_at < now() - (:lease_seconds * interval '1 second')
+            """),
+            {"lease_seconds": LEASE_SECONDS},
+        )
         rows = db.execute(
             text("""
                 with candidates as (
@@ -114,6 +129,38 @@ def process_batch() -> int:
     return len(events)
 
 
+def run_until_stopped(stop_event: Event, *, worker_name: str) -> None:
+    """Process the durable queue until shutdown, surviving transient failures."""
+    logger.info("outbox_worker_started worker=%s", worker_name)
+    while not stop_event.is_set():
+        try:
+            processed = process_batch()
+        except Exception:  # noqa: BLE001 - DB/network failures must not kill retries
+            logger.exception("outbox_poll_failed worker=%s", worker_name)
+            processed = 0
+        if not processed:
+            stop_event.wait(POLL_SECONDS)
+    logger.info("outbox_worker_stopped worker=%s", worker_name)
+
+
+def start_embedded_worker() -> tuple[Event, Thread]:
+    """Start the no-extra-cost API-hosted consumer used on Render Free.
+
+    The same lease SQL used by the standalone process protects against two API
+    instances temporarily running at once during a deploy.
+    """
+    stop_event = Event()
+    thread = Thread(
+        target=run_until_stopped,
+        args=(stop_event,),
+        kwargs={"worker_name": "embedded-api"},
+        name="outbox-embedded-worker",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
 def _request_stop(*_args: object) -> None:
     STOP.set()
 
@@ -122,12 +169,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
-    logger.info("outbox_worker_started")
-    while not STOP.is_set():
-        processed = process_batch()
-        if not processed:
-            STOP.wait(POLL_SECONDS)
-    logger.info("outbox_worker_stopped")
+    run_until_stopped(STOP, worker_name="standalone")
 
 
 if __name__ == "__main__":

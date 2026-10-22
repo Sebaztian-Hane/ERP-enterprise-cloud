@@ -63,10 +63,13 @@ Los cambios que alimentan al asistente se guardan primero en la tabla
 proceso `python -m app.workers.outbox` entrega posteriormente los eventos a
 n8n, con reintentos acotados y estado `dead` si no logra entregarlos.
 
-En Render debe configurarse como **Background Worker** separado de la API,
-usando la misma imagen, `DATABASE_URL` y secretos `RAG_*`. No se debe ejecutar
-este proceso dentro del servidor web ni habilitarlo hasta ejecutar la migración
-`0035_transactional_outbox.sql`.
+En Render Free, el API inicia este consumidor en un hilo supervisado para no
+requerir un segundo servicio de pago. El outbox persiste en PostgreSQL: un
+reinicio solo retrasa una entrega y las leases expiradas se recuperan. Si se
+migra a un **Background Worker** separado, establece
+`OUTBOX_EMBEDDED_WORKER_ENABLED=false` en el API y usa el mismo comando con
+`DATABASE_URL` y secretos `RAG_*`. No habilites ningún consumidor sin ejecutar
+antes la migración `0035_transactional_outbox.sql`.
 
 ## Consola de proveedor
 

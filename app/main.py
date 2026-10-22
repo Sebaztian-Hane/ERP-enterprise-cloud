@@ -1,4 +1,6 @@
 import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +15,39 @@ from app.core.rate_limit import limiter
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-app = FastAPI(title="ERP EnterpriseCloud API", version="0.1.0", docs_url="/docs", openapi_url="/openapi.json")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Run the durable RAG outbox on Free Render without a second service.
+
+    The transactional outbox remains in PostgreSQL, so an API restart only
+    delays a delivery. A paid Render worker can later replace this fallback by
+    setting ``OUTBOX_EMBEDDED_WORKER_ENABLED=false`` on the API.
+    """
+    stop_event = worker_thread = None
+    if (
+        settings.outbox_embedded_worker_enabled
+        and settings.rag_sync_webhook_url
+        and settings.rag_sync_webhook_secret
+    ):
+        from app.workers.outbox import start_embedded_worker
+
+        stop_event, worker_thread = start_embedded_worker()
+        logging.info("embedded_outbox_worker_enabled")
+    yield
+    if stop_event and worker_thread:
+        stop_event.set()
+        worker_thread.join(timeout=5)
+
+
+app = FastAPI(
+    title="ERP EnterpriseCloud API",
+    version="0.1.0",
+    docs_url="/docs",
+    openapi_url="/openapi.json",
+    lifespan=lifespan,
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(

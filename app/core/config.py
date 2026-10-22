@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     rag_integration_key: str | None = Field(default=None, repr=False)
     rag_sync_webhook_url: AnyHttpUrl | None = None
     rag_sync_webhook_secret: str | None = Field(default=None, repr=False)
+    # Render's free tier does not offer background workers. When enabled, the
+    # API process runs the outbox consumer in a daemon thread. PostgreSQL
+    # leases still make this safe if the application is later scaled out.
+    outbox_embedded_worker_enabled: bool = True
     rag_chat_webhook_url: AnyHttpUrl | None = None
     rag_chat_webhook_secret: str | None = Field(default=None, repr=False)
     # APISUNAT stays entirely server-side. The development token is a Render
