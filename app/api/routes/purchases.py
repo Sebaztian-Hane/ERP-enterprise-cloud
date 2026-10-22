@@ -17,6 +17,7 @@ from app.services.operational_context import resolve_warehouse_context
 from app.services.document_sequences import allocate_document_number
 from app.services.payment_terms import resolve_payment_term
 from app.services.taxes import resolve_default_tax_rate
+from app.services.cost_centers import resolve_cost_center
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -38,6 +39,16 @@ def list_purchase_payment_terms(actor: Actor = Depends(require_permission("purch
         from payment_terms
         where tenant_id=:tenant and is_active=true
         order by days_due, code, name
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.get("/cost-centers")
+def list_purchase_cost_centers(actor: Actor = Depends(require_permission("purchases:read")), db: Session = Depends(get_db)):
+    """Expose active tenant-owned dimensions without configuration access."""
+    return db.execute(text("""
+        select id, code, name from cost_centers
+        where tenant_id=:tenant and is_active=true
+        order by code, name
     """), {"tenant": str(actor.tenant_id)}).mappings().all()
 
 
@@ -86,6 +97,9 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         supplied_due_date=data.due_date,
         document_date=document_date,
     )
+    cost_center = resolve_cost_center(
+        db, tenant_id=actor.tenant_id, cost_center_id=data.cost_center_id,
+    )
     number = allocate_document_number(
         db, tenant_id=actor.tenant_id, module="purchases", document_type="purchase",
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
@@ -104,6 +118,9 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         payment_term_name=payment_term.name if payment_term else None,
         payment_term_days_due=payment_term.days_due if payment_term else None,
         due_date=due_date,
+        cost_center_id=cost_center.id,
+        cost_center_code=cost_center.code,
+        cost_center_name=cost_center.name,
         tax_rate_id=tax_rate.id,
         tax_rate_code=tax_rate.code,
         tax_rate_name=tax_rate.name,
@@ -131,7 +148,7 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         net = total - tax
         purchase.taxable_amount = net
         purchase.tax_amount = tax
-        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0"), cost_center.id), ("4011", tax, Decimal("0"), cost_center.id), ("4210", Decimal("0"), total, cost_center.id)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         complete_idempotency(
             db,

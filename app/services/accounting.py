@@ -27,7 +27,9 @@ def ensure_default_chart(db: Session, tenant_id: UUID) -> None:
 
 def post_entry(
     db: Session, *, tenant_id: UUID, actor_id: UUID, number: str, description: str,
-    source_type: str, source_id: UUID, lines: list[tuple[str, Decimal, Decimal]], entry_date: date | None = None,
+    source_type: str, source_id: UUID,
+    lines: list[tuple[str, Decimal, Decimal] | tuple[str, Decimal, Decimal, UUID]],
+    entry_date: date | None = None,
 ) -> None:
     """Create one immutable balanced entry. Duplicate source records are idempotent."""
     debit = sum((line[1] for line in lines), Decimal("0"))
@@ -43,12 +45,21 @@ def post_entry(
            "source_type": source_type, "source_id": str(source_id), "actor": str(actor_id)}).scalar()
     if not entry_id:
         return
-    for code, line_debit, line_credit in lines:
+    for line in lines:
+        code, line_debit, line_credit = line[:3]
+        cost_center_id = line[3] if len(line) == 4 else None
         account_id = db.execute(text("select id from chart_of_accounts where tenant_id=:tenant and code=:code"), {"tenant": str(tenant_id), "code": code}).scalar_one()
+        if cost_center_id:
+            valid_center = db.execute(text("""
+                select 1 from cost_centers
+                where tenant_id=:tenant and id=:cost_center
+            """), {"tenant": str(tenant_id), "cost_center": str(cost_center_id)}).first()
+            if not valid_center:
+                raise ValueError("El centro de costo contable no pertenece a la empresa")
         db.execute(text("""
-            insert into journal_lines(tenant_id, journal_entry_id, account_id, debit, credit)
-            values(:tenant, :entry, :account, :debit, :credit)
-        """), {"tenant": str(tenant_id), "entry": str(entry_id), "account": str(account_id), "debit": line_debit, "credit": line_credit})
+            insert into journal_lines(tenant_id, journal_entry_id, account_id, cost_center_id, debit, credit)
+            values(:tenant, :entry, :account, :cost_center, :debit, :credit)
+        """), {"tenant": str(tenant_id), "entry": str(entry_id), "account": str(account_id), "cost_center": str(cost_center_id) if cost_center_id else None, "debit": line_debit, "credit": line_credit})
 
 
 def split_tax(total: Decimal, rate_percent: Decimal = Decimal("18")) -> tuple[Decimal, Decimal]:

@@ -75,6 +75,7 @@ class SaleCreate(BaseModel):
     warehouse_id: UUID
     price_list_id: UUID | None = None
     payment_term_id: UUID | None = None
+    cost_center_id: UUID | None = None
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
     due_date: date | None = None
@@ -99,6 +100,9 @@ class SaleOut(ORMModel):
     payment_term_name: str | None
     payment_term_days_due: int | None
     due_date: date | None
+    cost_center_id: UUID | None
+    cost_center_code: str | None
+    cost_center_name: str | None
     tax_rate_id: UUID | None
     tax_rate_code: str | None
     tax_rate_name: str | None
@@ -150,6 +154,7 @@ class PurchaseCreate(BaseModel):
     supplier_document_date: date | None = None
     supplier_tax_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
     payment_term_id: UUID | None = None
+    cost_center_id: UUID | None = None
     due_date: date | None = None
 
     @model_validator(mode="after")
@@ -179,6 +184,9 @@ class PurchaseOut(ORMModel):
     payment_term_name: str | None
     payment_term_days_due: int | None
     due_date: date | None
+    cost_center_id: UUID | None
+    cost_center_code: str | None
+    cost_center_name: str | None
     tax_rate_id: UUID | None
     tax_rate_code: str | None
     tax_rate_name: str | None

@@ -45,6 +45,7 @@ from app.services.idempotency import claim as claim_idempotency, complete as com
 from app.services.operational_context import resolve_warehouse_context
 from app.services.stock import change_stock
 from app.services.taxes import resolve_default_tax_rate
+from app.services.cost_centers import resolve_cost_center
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -353,6 +354,9 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
             db, tenant_id=actor.tenant_id, document_date=date.today(),
         )
         taxable_amount, tax_amount = split_tax(total, tax_rate.rate)
+        cost_center = resolve_cost_center(
+            db, tenant_id=actor.tenant_id, cost_center_id=None,
+        )
         operational_context = resolve_warehouse_context(
             db, tenant_id=actor.tenant_id, warehouse_id=warehouse.id,
         )
@@ -363,6 +367,8 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
                 branch_id=operational_context.branch.id if operational_context.branch else None,
                 status="posted", total=total, note=first["note"],
+                cost_center_id=cost_center.id, cost_center_code=cost_center.code,
+                cost_center_name=cost_center.name,
                 tax_rate_id=tax_rate.id, tax_rate_code=tax_rate.code,
                 tax_rate_name=tax_rate.name, tax_rate_percent=tax_rate.rate,
                 taxable_amount=taxable_amount, tax_amount=tax_amount,
@@ -373,7 +379,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 product = products[line["product_sku"]]
                 db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=product.id, quantity=line["quantity"], unit_price=line["unit_value"], line_total=line["quantity"] * line["unit_value"]))
                 change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=-line["quantity"], movement_type="issue", reference=number)
-            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta importada {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), taxable_amount), ("4010", Decimal("0"), tax_amount)])
+            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta importada {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0"), cost_center.id), ("7010", Decimal("0"), taxable_amount, cost_center.id), ("4010", Decimal("0"), tax_amount, cost_center.id)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="sales", entity="sale", entity_id=sale.id)
         else:
             purchase = Purchase(
@@ -382,6 +388,8 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
                 branch_id=operational_context.branch.id if operational_context.branch else None,
                 status="received", total=total, note=first["note"],
+                cost_center_id=cost_center.id, cost_center_code=cost_center.code,
+                cost_center_name=cost_center.name,
                 tax_rate_id=tax_rate.id, tax_rate_code=tax_rate.code,
                 tax_rate_name=tax_rate.name, tax_rate_percent=tax_rate.rate,
                 taxable_amount=taxable_amount, tax_amount=tax_amount,
@@ -392,7 +400,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 product = products[line["product_sku"]]
                 db.add(PurchaseItem(tenant_id=actor.tenant_id, purchase_id=purchase.id, product_id=product.id, quantity=line["quantity"], unit_cost=line["unit_value"], line_total=line["quantity"] * line["unit_value"]))
                 change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=line["quantity"], movement_type="receipt", reference=number)
-            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra importada {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", taxable_amount, Decimal("0")), ("4011", tax_amount, Decimal("0")), ("4210", Decimal("0"), total)])
+            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra importada {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", taxable_amount, Decimal("0"), cost_center.id), ("4011", tax_amount, Decimal("0"), cost_center.id), ("4210", Decimal("0"), total, cost_center.id)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="purchases", entity="purchase", entity_id=purchase.id)
     return len(grouped)
 
