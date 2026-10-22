@@ -249,6 +249,7 @@ class Sale(TimestampedTenantModel):
     number: Mapped[str] = mapped_column(String(40), nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
+    price_list_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.id"))
     # Operational context is derived from the selected warehouse at posting time.
     # It is stored on the document so later warehouse reconfiguration cannot
     # alter the legal/audit context of an already posted transaction.

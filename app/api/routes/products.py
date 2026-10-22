@@ -1,6 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -36,10 +36,17 @@ def create_category(data: CategoryCreate, actor: Actor = Depends(require_permiss
 def list_products(
     actor: Actor = Depends(require_permission("products:read")),
     db: Session = Depends(get_db),
+    q: str | None = Query(default=None, min_length=1, max_length=120),
+    active: bool | None = Query(default=None),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
 ):
     statement = select(Product).where(Product.tenant_id == actor.tenant_id).order_by(Product.name, Product.id)
+    if q:
+        pattern = f"%{q.strip()}%"
+        statement = statement.where(or_(Product.name.ilike(pattern), Product.sku.ilike(pattern)))
+    if active is not None:
+        statement = statement.where(Product.is_active.is_(active))
     if not isinstance(page, int) and not isinstance(page_size, int):
         return db.scalars(statement).all()
     return paginate(db, statement, key="products", page=page or 1, page_size=page_size or 25)

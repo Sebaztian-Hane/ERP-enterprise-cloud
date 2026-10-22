@@ -1,14 +1,15 @@
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
 from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, LegalEntity, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
-from app.schemas.transactions import CancelTransaction, SaleCreate, SaleOut
+from app.schemas.transactions import CancelTransaction, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
@@ -25,6 +26,49 @@ from app.services.document_sequences import allocate_document_number
 router = APIRouter(prefix="/sales", tags=["sales"])
 
 
+def _resolve_price_list_prices(
+    db: Session, *, tenant_id, price_list_id, lines,
+) -> dict:
+    """Resolve only currently-valid tier prices for a tenant-owned price list.
+
+    This is deliberately used again by the posting command: a browser preview
+    is helpful, but it must never be the authority for a commercial amount.
+    """
+    price_list = db.execute(text("""
+        select id, code, name
+        from price_lists
+        where id=:price_list and tenant_id=:tenant and is_active=true
+          and valid_from <= current_date
+          and (valid_to is null or valid_to >= current_date)
+    """), {"price_list": str(price_list_id), "tenant": str(tenant_id)}).mappings().first()
+    if not price_list:
+        raise HTTPException(status_code=422, detail="La lista de precios no está vigente o no pertenece a la empresa activa")
+
+    resolved = {}
+    for line in lines:
+        item = db.execute(text("""
+            select unit_price
+            from price_list_items
+            where tenant_id=:tenant and price_list_id=:price_list
+              and product_id=:product and is_active=true
+              and min_quantity <= :quantity
+              and valid_from <= current_date
+              and (valid_to is null or valid_to >= current_date)
+            order by min_quantity desc, valid_from desc, id desc
+            limit 1
+        """), {
+            "tenant": str(tenant_id), "price_list": str(price_list_id),
+            "product": str(line.product_id), "quantity": line.quantity,
+        }).scalar_one_or_none()
+        if item is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"La lista {price_list['code']} no tiene una tarifa vigente para uno de los productos o su cantidad",
+            )
+        resolved[line.product_id] = Decimal(item)
+    return resolved
+
+
 @router.get("/warehouses")
 def list_sale_warehouses(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
     """Expose only eligible warehouse identities needed when recording a sale."""
@@ -32,6 +76,39 @@ def list_sale_warehouses(actor: Actor = Depends(require_permission("sales:read")
         Warehouse.tenant_id == actor.tenant_id,
         Warehouse.is_active.is_(True),
     ).order_by(Warehouse.name)).all()
+
+
+@router.get("/price-lists")
+def list_sale_price_lists(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
+    """Lists commercial price lists eligible for a new sale, not historical ones."""
+    return db.execute(text("""
+        select l.id, l.code, l.name, c.code as currency_code, c.symbol as currency_symbol
+        from price_lists l
+        join currencies c on c.id=l.currency_id and c.tenant_id=l.tenant_id
+        where l.tenant_id=:tenant and l.is_active=true
+          and l.valid_from <= current_date
+          and (l.valid_to is null or l.valid_to >= current_date)
+        order by l.code, l.name
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.post("/price-lists/{price_list_id}/quote")
+def quote_sale_price_list(
+    price_list_id: UUID,
+    data: PriceListQuoteCreate,
+    actor: Actor = Depends(require_permission("sales:read")),
+    db: Session = Depends(get_db),
+):
+    prices = _resolve_price_list_prices(
+        db, tenant_id=actor.tenant_id, price_list_id=price_list_id, lines=data.lines,
+    )
+    return {
+        "price_list_id": str(price_list_id),
+        "lines": [
+            {"product_id": str(line.product_id), "quantity": line.quantity, "unit_price": prices[line.product_id]}
+            for line in data.lines
+        ],
+    }
 
 
 @router.get("")
@@ -283,7 +360,16 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
     if not customer or products != product_ids:
         raise HTTPException(status_code=404, detail="Cliente, almacén o producto no pertenece a la empresa activa")
-    total = sum((line.quantity * line.unit_price for line in data.lines), Decimal("0"))
+    resolved_prices = (
+        _resolve_price_list_prices(
+            db, tenant_id=actor.tenant_id, price_list_id=data.price_list_id, lines=data.lines,
+        )
+        if data.price_list_id else {}
+    )
+    total = sum((
+        line.quantity * resolved_prices.get(line.product_id, line.unit_price)
+        for line in data.lines
+    ), Decimal("0"))
     number = allocate_document_number(
         db, tenant_id=actor.tenant_id, module="sales", document_type="sale",
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
@@ -292,6 +378,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     sale = Sale(
         tenant_id=actor.tenant_id, number=number, customer_id=customer_id,
         warehouse_id=data.warehouse_id,
+        price_list_id=data.price_list_id,
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
         branch_id=operational_context.branch.id if operational_context.branch else None,
         status="posted", total=total, note=data.note,
@@ -305,7 +392,8 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             Product.id.in_(product_ids),
         ).with_for_update()).all()}
         for line in data.lines:
-            db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=line.quantity * line.unit_price))
+            unit_price = resolved_prices.get(line.product_id, line.unit_price)
+            db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=unit_price, line_total=line.quantity * unit_price))
             issue_tracked_stock(
                 db, tenant_id=actor.tenant_id, product=products_by_id[line.product_id],
                 warehouse_id=data.warehouse_id, quantity=line.quantity, reference=number,

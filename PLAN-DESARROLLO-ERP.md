@@ -138,9 +138,10 @@ ese mismo alcance.
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de
       precio, condiciones de pago y políticas de descuento.
 - [x] Incorporar maestros aislados por empresa para tipos de cambio con fecha
-      efectiva, listas de precios con vigencia y políticas de descuento con
-      límite y requisito de aprobación. Los ítems por producto y la aplicación
-      automática al confirmar ventas continúan en la fase comercial.
+      efectiva, listas de precios con vigencia, tarifas por producto/cantidad y
+      políticas de descuento con límite y requisito de aprobación. Las ventas
+      resuelven y guardan la tarifa vigente en el servidor, sin confiar en el
+      importe enviado por el navegador.
 - [ ] Definir centros de costo/dimensiones contables y su validación por rol.
 - [ ] Añadir reglas de calidad, deduplicación, consolidación controlada y
       trazabilidad de cliente/proveedor/producto.

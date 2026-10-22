@@ -29,6 +29,28 @@ class SaleLineCreate(BaseModel):
         return normalized
 
 
+class PriceListQuoteLine(BaseModel):
+    product_id: UUID
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
+
+    @field_validator("quantity")
+    @classmethod
+    def quote_quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
+
+
+class PriceListQuoteCreate(BaseModel):
+    lines: list[PriceListQuoteLine] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def quote_products_must_be_unique(self):
+        if len({line.product_id for line in self.lines}) != len(self.lines):
+            raise ValueError("Un producto solo puede aparecer una vez")
+        return self
+
+
 class SaleCustomerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     tax_id: str = Field(min_length=8, max_length=11)
@@ -51,6 +73,7 @@ class SaleCreate(BaseModel):
     customer_id: UUID | None = None
     customer: SaleCustomerCreate | None = None
     warehouse_id: UUID
+    price_list_id: UUID | None = None
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
     due_date: date | None = None
@@ -69,6 +92,7 @@ class SaleOut(ORMModel):
     number: str
     customer_id: UUID
     warehouse_id: UUID
+    price_list_id: UUID | None
     legal_entity_id: UUID | None
     branch_id: UUID | None
     status: str
