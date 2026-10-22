@@ -137,6 +137,10 @@ ese mismo alcance.
       a cargo del proveedor CPE hasta configurar series por establecimiento.
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de
       precio, condiciones de pago y políticas de descuento.
+- [x] Incorporar maestros aislados por empresa para tipos de cambio con fecha
+      efectiva, listas de precios con vigencia y políticas de descuento con
+      límite y requisito de aprobación. Los ítems por producto y la aplicación
+      automática al confirmar ventas continúan en la fase comercial.
 - [ ] Definir centros de costo/dimensiones contables y su validación por rol.
 - [ ] Añadir reglas de calidad, deduplicación, consolidación controlada y
       trazabilidad de cliente/proveedor/producto.

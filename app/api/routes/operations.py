@@ -90,6 +90,63 @@ class MasterIn(BaseModel):
     is_active: bool = True
 
 
+class ExchangeRateIn(BaseModel):
+    currency_id: UUID
+    effective_date: date = Field(default_factory=date.today)
+    rate_to_base: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    source: str = Field(default="manual", min_length=2, max_length=40)
+
+
+class PriceListIn(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=160)
+    currency_id: UUID
+    valid_from: date = Field(default_factory=date.today)
+    valid_to: date | None = None
+    is_active: bool = True
+
+    @field_validator("valid_to")
+    @classmethod
+    def valid_end_is_not_past_start(cls, value: date | None, info) -> date | None:
+        if value and value < info.data.get("valid_from", value):
+            raise ValueError("La vigencia final no puede ser anterior a la inicial")
+        return value
+
+
+class PriceListItemIn(BaseModel):
+    product_id: UUID
+    min_quantity: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=3)
+    unit_price: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    valid_from: date = Field(default_factory=date.today)
+    valid_to: date | None = None
+    is_active: bool = True
+
+    @field_validator("valid_to")
+    @classmethod
+    def item_valid_end_is_not_past_start(cls, value: date | None, info) -> date | None:
+        if value and value < info.data.get("valid_from", value):
+            raise ValueError("La vigencia final no puede ser anterior a la inicial")
+        return value
+
+
+class DiscountPolicyIn(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=160)
+    scope: str = Field(default="sale", pattern="^(sale|customer|product|price_list)$")
+    max_discount_percent: Decimal = Field(ge=0, le=100, max_digits=7, decimal_places=4)
+    requires_approval: bool = False
+    valid_from: date = Field(default_factory=date.today)
+    valid_to: date | None = None
+    is_active: bool = True
+
+    @field_validator("valid_to")
+    @classmethod
+    def policy_valid_end_is_not_past_start(cls, value: date | None, info) -> date | None:
+        if value and value < info.data.get("valid_from", value):
+            raise ValueError("La vigencia final no puede ser anterior a la inicial")
+        return value
+
+
 MASTER_TABLES = {
     "taxes": ("tax_rates", "rate"), "currencies": ("currencies", "symbol"),
     "units": ("units_of_measure", None), "payment-terms": ("payment_terms", "days_due"),
@@ -505,27 +562,178 @@ def trial_balance(actor: Actor = Depends(require_permission("accounting:read")),
       where a.tenant_id=:tenant group by a.id order by a.code"""), {"tenant": str(actor.tenant_id)}).mappings().all()
 
 
-@router.post("/configuration/{resource}", status_code=status.HTTP_201_CREATED)
-def create_master(resource: str, data: MasterIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
-    definition = MASTER_TABLES.get(resource)
-    if not definition: raise HTTPException(status_code=404, detail="Catálogo no reconocido")
-    table, extra = definition
-    values = {"tenant": str(actor.tenant_id), "code": data.code.upper(), "name": data.name, "active": data.is_active}
-    columns, params = "tenant_id,code,name,is_active", ":tenant,:code,:name,:active"
-    if extra:
-        value = getattr(data, extra)
-        if value is None: raise HTTPException(status_code=422, detail=f"El campo {extra} es obligatorio")
-        values[extra] = value; columns += f",{extra}"; params += f",:{extra}"
+def _ensure_active_currency(db: Session, tenant_id: UUID, currency_id: UUID) -> None:
+    exists = db.execute(text("""
+        select 1 from currencies
+        where id=:currency and tenant_id=:tenant and is_active=true
+    """), {"currency": str(currency_id), "tenant": str(tenant_id)}).first()
+    if not exists:
+        raise HTTPException(status_code=422, detail="La moneda debe estar activa y pertenecer a la empresa")
+
+
+@router.get("/configuration/exchange-rates")
+def list_exchange_rates(actor: Actor = Depends(require_permission("configuration:read")), db: Session = Depends(get_db)):
+    return db.execute(text("""
+        select r.*, c.code as currency_code, c.name as currency_name, c.symbol as currency_symbol
+        from currency_exchange_rates r
+        join currencies c on c.id=r.currency_id and c.tenant_id=r.tenant_id
+        where r.tenant_id=:tenant
+        order by r.effective_date desc, c.code
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.post("/configuration/exchange-rates", status_code=status.HTTP_201_CREATED)
+def create_exchange_rate(data: ExchangeRateIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
+    _ensure_active_currency(db, actor.tenant_id, data.currency_id)
     try:
-        row = db.execute(text(f"insert into {table}({columns}) values({params}) returning *"), values).mappings().one()
-        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="configuration", entity=table, entity_id=row["id"])
-        db.commit(); return row
+        row = db.execute(text("""
+            insert into currency_exchange_rates(tenant_id,currency_id,effective_date,rate_to_base,source)
+            values(:tenant,:currency,:effective_date,:rate,:source) returning *
+        """), {"tenant": str(actor.tenant_id), "currency": str(data.currency_id),
+               "effective_date": data.effective_date, "rate": data.rate_to_base,
+               "source": data.source.strip()}).mappings().one()
     except Exception as exc:
-        db.rollback(); raise HTTPException(status_code=409, detail="El código ya existe en este catálogo") from exc
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Ya existe un tipo de cambio para esa moneda y fecha") from exc
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create",
+           module="configuration", entity="currency_exchange_rate", entity_id=row["id"])
+    db.commit()
+    return row
+
+
+@router.get("/configuration/price-lists")
+def list_price_lists(actor: Actor = Depends(require_permission("configuration:read")), db: Session = Depends(get_db)):
+    return db.execute(text("""
+        select l.*, c.code as currency_code, c.symbol as currency_symbol,
+               count(i.id) as item_count
+        from price_lists l
+        join currencies c on c.id=l.currency_id and c.tenant_id=l.tenant_id
+        left join price_list_items i on i.price_list_id=l.id and i.tenant_id=l.tenant_id and i.is_active=true
+        where l.tenant_id=:tenant
+        group by l.id,c.code,c.symbol
+        order by l.is_active desc,l.valid_from desc,l.code
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.post("/configuration/price-lists", status_code=status.HTTP_201_CREATED)
+def create_price_list(data: PriceListIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
+    _ensure_active_currency(db, actor.tenant_id, data.currency_id)
+    try:
+        row = db.execute(text("""
+            insert into price_lists(tenant_id,code,name,currency_id,valid_from,valid_to,is_active)
+            values(:tenant,:code,:name,:currency,:valid_from,:valid_to,:active) returning *
+        """), {"tenant": str(actor.tenant_id), "code": data.code.strip().upper(), "name": data.name.strip(),
+               "currency": str(data.currency_id), "valid_from": data.valid_from,
+               "valid_to": data.valid_to, "active": data.is_active}).mappings().one()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El código de lista de precios ya existe") from exc
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create",
+           module="configuration", entity="price_list", entity_id=row["id"])
+    db.commit()
+    return row
+
+
+@router.get("/configuration/price-lists/{price_list_id}/items")
+def list_price_list_items(price_list_id: UUID, actor: Actor = Depends(require_permission("configuration:read")), db: Session = Depends(get_db)):
+    return db.execute(text("""
+        select i.*, p.sku as product_sku, p.name as product_name
+        from price_list_items i
+        join products p on p.id=i.product_id and p.tenant_id=i.tenant_id
+        where i.tenant_id=:tenant and i.price_list_id=:price_list
+        order by i.is_active desc,p.name,i.min_quantity,i.valid_from desc
+    """), {"tenant": str(actor.tenant_id), "price_list": str(price_list_id)}).mappings().all()
+
+
+@router.post("/configuration/price-lists/{price_list_id}/items", status_code=status.HTTP_201_CREATED)
+def create_price_list_item(price_list_id: UUID, data: PriceListItemIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
+    parent = db.execute(text("""
+        select id from price_lists
+        where id=:price_list and tenant_id=:tenant and is_active=true
+    """), {"price_list": str(price_list_id), "tenant": str(actor.tenant_id)}).first()
+    product = db.execute(text("""
+        select id from products where id=:product and tenant_id=:tenant and is_active=true
+    """), {"product": str(data.product_id), "tenant": str(actor.tenant_id)}).first()
+    if not parent or not product:
+        raise HTTPException(status_code=422, detail="La lista y el producto deben estar activos y pertenecer a la empresa")
+    try:
+        row = db.execute(text("""
+            insert into price_list_items(tenant_id,price_list_id,product_id,min_quantity,unit_price,valid_from,valid_to,is_active)
+            values(:tenant,:price_list,:product,:min_quantity,:unit_price,:valid_from,:valid_to,:active)
+            returning *
+        """), {"tenant": str(actor.tenant_id), "price_list": str(price_list_id), "product": str(data.product_id),
+               "min_quantity": data.min_quantity, "unit_price": data.unit_price, "valid_from": data.valid_from,
+               "valid_to": data.valid_to, "active": data.is_active}).mappings().one()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Ya existe una vigencia para ese producto y cantidad mínima") from exc
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create",
+           module="configuration", entity="price_list_item", entity_id=row["id"])
+    db.commit()
+    return row
+
+
+@router.get("/configuration/discount-policies")
+def list_discount_policies(actor: Actor = Depends(require_permission("configuration:read")), db: Session = Depends(get_db)):
+    return db.execute(text("""
+        select * from discount_policies where tenant_id=:tenant
+        order by is_active desc,valid_from desc,code
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.post("/configuration/discount-policies", status_code=status.HTTP_201_CREATED)
+def create_discount_policy(data: DiscountPolicyIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
+    try:
+        row = db.execute(text("""
+            insert into discount_policies(
+                tenant_id,code,name,scope,max_discount_percent,requires_approval,valid_from,valid_to,is_active
+            ) values(
+                :tenant,:code,:name,:scope,:max_discount_percent,:requires_approval,:valid_from,:valid_to,:active
+            ) returning *
+        """), {"tenant": str(actor.tenant_id), "code": data.code.strip().upper(), "name": data.name.strip(),
+               "scope": data.scope, "max_discount_percent": data.max_discount_percent,
+               "requires_approval": data.requires_approval, "valid_from": data.valid_from,
+               "valid_to": data.valid_to, "active": data.is_active}).mappings().one()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El código de política de descuento ya existe") from exc
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create",
+           module="configuration", entity="discount_policy", entity_id=row["id"])
+    db.commit()
+    return row
 
 
 @router.get("/configuration/{resource}")
 def list_master(resource: str, actor: Actor = Depends(require_permission("configuration:read")), db: Session = Depends(get_db)):
     definition = MASTER_TABLES.get(resource)
-    if not definition: raise HTTPException(status_code=404, detail="Catálogo no reconocido")
-    return db.execute(text(f"select * from {definition[0]} where tenant_id=:tenant order by code"), {"tenant": str(actor.tenant_id)}).mappings().all()
+    if not definition:
+        raise HTTPException(status_code=404, detail="Catálogo no reconocido")
+    return db.execute(
+        text(f"select * from {definition[0]} where tenant_id=:tenant order by code"),
+        {"tenant": str(actor.tenant_id)},
+    ).mappings().all()
+
+
+@router.post("/configuration/{resource}", status_code=status.HTTP_201_CREATED)
+def create_master(resource: str, data: MasterIn, actor: Actor = Depends(require_permission("configuration:write")), db: Session = Depends(get_db)):
+    definition = MASTER_TABLES.get(resource)
+    if not definition:
+        raise HTTPException(status_code=404, detail="Catálogo no reconocido")
+    table, extra = definition
+    values = {"tenant": str(actor.tenant_id), "code": data.code.strip().upper(), "name": data.name.strip(), "active": data.is_active}
+    columns, params = "tenant_id,code,name,is_active", ":tenant,:code,:name,:active"
+    if extra:
+        value = getattr(data, extra)
+        if value is None:
+            raise HTTPException(status_code=422, detail=f"El campo {extra} es obligatorio")
+        values[extra] = value
+        columns += f",{extra}"
+        params += f",:{extra}"
+    try:
+        row = db.execute(text(f"insert into {table}({columns}) values({params}) returning *"), values).mappings().one()
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="configuration", entity=table, entity_id=row["id"])
+        db.commit()
+        return row
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El código ya existe en este catálogo") from exc
