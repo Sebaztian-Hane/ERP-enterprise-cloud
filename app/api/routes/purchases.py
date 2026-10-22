@@ -90,12 +90,12 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
             receive_tracked_stock(
                 db, tenant_id=actor.tenant_id, actor_id=actor.user_id, product=product_cost,
                 warehouse_id=data.warehouse_id, quantity=line.quantity, unit_cost=line.unit_cost,
-                reference=data.number, lot_number=line.lot_number,
+                reference=number, lot_number=line.lot_number,
                 expiration_date=line.expiration_date, serial_numbers=line.serial_numbers,
             )
         tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else split_tax(total)[1]
         net = total - tax
-        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Compra {data.number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         complete_idempotency(
             db,

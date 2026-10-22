@@ -308,11 +308,11 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=line.quantity * line.unit_price))
             issue_tracked_stock(
                 db, tenant_id=actor.tenant_id, product=products_by_id[line.product_id],
-                warehouse_id=data.warehouse_id, quantity=line.quantity, reference=data.number,
+                warehouse_id=data.warehouse_id, quantity=line.quantity, reference=number,
                 serial_numbers=line.serial_numbers,
             )
         net, tax = split_tax(total)
-        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{data.number}", description=f"Venta {data.number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
         complete_idempotency(
             db,
