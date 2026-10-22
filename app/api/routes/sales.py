@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,11 +12,13 @@ from app.schemas.transactions import CancelTransaction, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
-from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, send_bill, void_bill
+from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, void_bill
 from app.services.traceability import issue_tracked_stock, return_tracked_sale_stock
 from app.services.decolecta import DecolectaError, lookup_tax_id
+from app.services.electronic_delivery import provider_status
 from app.services.accounting import post_entry, reverse_entry, split_tax
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
+from app.services.outbox import enqueue
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -64,11 +66,6 @@ def _electronic_document(sale_id: str, actor: Actor, db: Session) -> tuple[Sale,
     return sale, document
 
 
-def _provider_status(value: object) -> str:
-    mapping = {"PENDIENTE": "pending", "ACEPTADO": "accepted", "RECHAZADO": "rejected", "EXCEPCION": "exception"}
-    return mapping.get(str(value).upper(), "error")
-
-
 @router.get("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut | None)
 def get_electronic_document(sale_id: str, actor: Actor = Depends(require_permission("electronic_billing:read")), db: Session = Depends(get_db)):
     _, document = _electronic_document(sale_id, actor, db)
@@ -76,7 +73,7 @@ def get_electronic_document(sale_id: str, actor: Actor = Depends(require_permiss
 
 
 @router.post("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut, status_code=status.HTTP_201_CREATED)
-def issue_electronic_document(sale_id: str, request: Request, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+def issue_electronic_document(sale_id: str, request: Request, response: Response, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
         db,
         tenant_id=actor.tenant_id,
@@ -105,35 +102,62 @@ def issue_electronic_document(sale_id: str, request: Request, data: ElectronicDo
     series = settings.apisunat_invoice_series if data.document_type == "01" else settings.apisunat_receipt_series
     try:
         correlative = next_correlative(settings, data.document_type, series)
-        now = datetime.now(timezone.utc)
-        issue_date, issue_time = now.date().isoformat(), now.strftime("%H:%M:%S")
-        body = build_document_body(
-            sale_number=sale.number, issue_date=issue_date, issue_time=issue_time, document_type=data.document_type, series=series, correlative=correlative,
-            issuer={"ruc": settings.apisunat_issuer_ruc or "", "trade_name": settings.apisunat_issuer_trade_name or "", "legal_name": settings.apisunat_issuer_legal_name or "", "address": settings.apisunat_issuer_address or ""},
-            customer={"tax_id": tax_id, "name": customer.name, "address": ""},
-            lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit, "description": product.name} for item, product in items],
-            total=sale.total,
-        )
-        file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
-        response = send_bill(settings, {"personaId": settings.apisunat_persona_id, "personaToken": settings.apisunat_persona_token, "fileName": file_name, "documentBody": body, **({"customerEmail": customer.email} if customer.email else {})})
-        if not response.get("documentId"):
-            raise APISunatError("APISUNAT no devolvió el identificador del comprobante")
     except APISunatError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    document = ElectronicDocument(tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type, series=series, correlative=correlative, file_name=file_name, status=_provider_status(response.get("status")), provider_document_id=response.get("documentId"), taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total, provider_payload=response)
-    db.add(document)
-    db.flush()
-    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="issue", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=f"{file_name} · {response.get('status', 'PENDIENTE')}")
-    complete_idempotency(
-        db,
-        claim=idempotency,
-        response_body=ElectronicDocumentOut.model_validate(document).model_dump(mode="json"),
-        response_status=status.HTTP_201_CREATED,
+    now = datetime.now(timezone.utc)
+    issue_date, issue_time = now.date().isoformat(), now.strftime("%H:%M:%S")
+    file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
+    body = build_document_body(
+        sale_number=sale.number, issue_date=issue_date, issue_time=issue_time,
+        document_type=data.document_type, series=series, correlative=correlative,
+        issuer={"ruc": settings.apisunat_issuer_ruc or "", "trade_name": settings.apisunat_issuer_trade_name or "", "legal_name": settings.apisunat_issuer_legal_name or "", "address": settings.apisunat_issuer_address or ""},
+        customer={"tax_id": tax_id, "name": customer.name, "address": ""},
+        lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit, "description": product.name} for item, product in items],
+        total=sale.total,
     )
-    db.commit()
+    # Reserve the document and its provider payload in the same transaction as
+    # the outbox event. The web request never crosses the provider boundary.
+    # This removes the ambiguous "provider accepted but HTTP timed out" case.
+    document = ElectronicDocument(
+        tenant_id=actor.tenant_id, sale_id=sale.id, document_type=data.document_type,
+        series=series, correlative=correlative, file_name=file_name, status="reserved",
+        taxable_amount=taxable, tax_amount=sale.total - taxable, total_amount=sale.total,
+        provider_payload={
+            "submission": {
+                "document_body": body,
+                "customer_email": customer.email or None,
+            }
+        },
+    )
+    db.add(document)
+    try:
+        db.flush()
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reserve", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=file_name)
+        enqueue(
+            db,
+            tenant_id=actor.tenant_id,
+            topic="cpe.submit",
+            payload={
+                "tenant_id": str(actor.tenant_id),
+                "document_id": str(document.id),
+                "actor_user_id": str(actor.user_id),
+            },
+        )
+        response_body = ElectronicDocumentOut.model_validate(document).model_dump(mode="json")
+        complete_idempotency(
+            db,
+            claim=idempotency,
+            response_body=response_body,
+            response_status=status.HTTP_202_ACCEPTED,
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="El correlativo ya fue reservado; vuelve a intentarlo sin reemitir") from exc
     db.refresh(document)
+    response.status_code = status.HTTP_202_ACCEPTED
     return document
 
 
@@ -146,7 +170,7 @@ def refresh_electronic_document(sale_id: str, actor: Actor = Depends(require_per
         response = get_document(get_settings(), document.provider_document_id)
     except APISunatError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    document.status = _provider_status(response.get("status"))
+    document.status = provider_status(response.get("status"))
     document.xml_url = response.get("xml") if isinstance(response.get("xml"), str) else document.xml_url
     document.cdr_url = response.get("cdr") if isinstance(response.get("cdr"), str) else document.cdr_url
     document.provider_payload = response

@@ -40,8 +40,8 @@
   validez legal.
 - La emisión electrónica aún es un flujo de desarrollo; no es una operación
   fiscal productiva completa.
-- El despliegue actual y el procesamiento de integraciones no tienen todavía
-  workers, outbox, DLQ, SLO ni recuperación probada.
+- El despliegue gratuito usa un consumidor embebido con outbox persistente para
+  RAG y CPE. El worker separado, la observabilidad y los SLO siguen pendientes.
 
 ---
 
@@ -90,18 +90,17 @@ y no quedan parcialmente aplicadas.
 
 **Avance actual:** ya existe la infraestructura persistente de idempotencia y
 está aplicada a ventas, recepción de compras, pagos y comandos de inventario
-(reservas, conteos, ajustes y transferencias). Los eventos de RAG ya usan una
-outbox transaccional y un worker con reintentos. Los commits de importación
-también son idempotentes por hash del archivo. La emisión de comprobantes ya
-reproduce la respuesta ante reintentos del navegador; su entrega durable al
-proveedor mediante outbox sigue pendiente.
+(reservas, conteos, ajustes y transferencias). Los eventos de RAG y la reserva
+de CPE usan una outbox transaccional con recuperación de leases. Los commits de
+importación también son idempotentes por hash del archivo. En Render Free el
+consumidor se ejecuta dentro del API; un worker separado sigue pendiente.
 
-- [ ] Implementar almacenamiento transversal de `Idempotency-Key` para ventas,
+- [x] Implementar almacenamiento transversal de `Idempotency-Key` para ventas,
       pagos, transferencias, recepciones, importaciones y CPE.
-- [ ] Rechazar una misma clave con payload distinto y devolver el resultado
+- [x] Rechazar una misma clave con payload distinto y devolver el resultado
       original en reintentos legítimos.
-- [ ] Reemplazar eventos en hilos efímeros por patrón **transactional outbox**.
-- [ ] Añadir consumidor/inbox idempotente, reintentos acotados, dead-letter
+- [x] Reemplazar eventos en hilos efímeros por patrón **transactional outbox**.
+- [x] Añadir consumidor/inbox idempotente, reintentos acotados, dead-letter
       queue y trazabilidad de eventos externos.
 - [ ] Crear pruebas BOLA/IDOR y RLS para todas las rutas, tablas, documentos y
       exportaciones; incluir ataques con otro `tenant_id`.
@@ -189,7 +188,7 @@ con soporte verificable.
 
 - [ ] Formalizar el adaptador CPE con estados `draft`, `validated`, `reserved`,
       `submitted`, `accepted`, `observed`, `rejected` y `unknown`.
-- [ ] Reservar serie/correlativo de forma idempotente y solo una vez.
+- [x] Reservar serie/correlativo de forma idempotente y solo una vez.
 - [ ] Conservar XML, CDR, PDF, hashes, respuestas, timestamps y correlación del
       proveedor en almacenamiento privado con retención definida.
 - [ ] Implementar reconsulta y conciliación ante timeout o respuesta incierta;

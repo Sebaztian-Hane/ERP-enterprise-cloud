@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.services.outbox import enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +184,7 @@ def queue_sync_event(db: Session, *, tenant_id: UUID, module: str, entity: str, 
         "entity_id": str(entity_id) if entity_id else None, "action": action,
         "occurred_at": datetime.utcnow().isoformat() + "Z",
     }
-    db.execute(
-        text("""
-            insert into outbox_events(tenant_id, topic, payload)
-            values (:tenant_id, 'rag.sync', cast(:payload as jsonb))
-        """),
-        {"tenant_id": str(tenant_id), "payload": json.dumps(event, separators=(",", ":"))},
-    )
+    enqueue(db, tenant_id=tenant_id, topic="rag.sync", payload=event)
 
 
 def signed_request(payload: dict[str, Any], secret: str) -> tuple[bytes, dict[str, str]]:

@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db.session import SessionLocal
+from app.services.electronic_delivery import deliver_cpe_submission
 from app.services.rag_sync import dispatch_sync_event
 
 
@@ -120,9 +121,12 @@ def process_batch() -> int:
         try:
             payload = dict(event["payload"])
             payload["event_id"] = str(event["id"])
-            if event["topic"] != "rag.sync":
+            if event["topic"] == "rag.sync":
+                dispatch_sync_event(payload)
+            elif event["topic"] == "cpe.submit":
+                deliver_cpe_submission(payload)
+            else:
                 raise RuntimeError(f"Tema de outbox no soportado: {event['topic']}")
-            dispatch_sync_event(payload)
             mark_delivered(str(event["id"]))
         except Exception as exc:  # noqa: BLE001 - persist all delivery errors
             mark_failed(str(event["id"]), int(event["attempts"]), exc)

@@ -2,6 +2,7 @@ import json
 from decimal import Decimal
 
 from app.services.apisunat import build_document_body
+from app.services.electronic_delivery import provider_status
 
 
 def test_cpe_payload_is_json_serializable_with_decimal_sale_values():
@@ -22,3 +23,9 @@ def test_cpe_payload_is_json_serializable_with_decimal_sale_values():
 
     assert '"_text": 7' in encoded
     assert body["cac:InvoiceLine"][0]["cbc:InvoicedQuantity"]["_text"] == 7
+
+
+def test_unknown_provider_state_stays_uncertain_instead_of_becoming_rejected():
+    assert provider_status("ACEPTADO") == "accepted"
+    assert provider_status("PENDIENTE") == "submitted"
+    assert provider_status("unexpected-provider-state") == "unknown"

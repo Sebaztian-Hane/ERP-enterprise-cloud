@@ -71,6 +71,11 @@ migra a un **Background Worker** separado, establece
 `DATABASE_URL` y secretos `RAG_*`. No habilites ningún consumidor sin ejecutar
 antes la migración `0035_transactional_outbox.sql`.
 
+La emisión de CPE también usa la misma cola: la API reserva serie, correlativo
+y contenido antes de responder `202 Accepted`; el consumidor envía después al
+proveedor. Si un envío externo queda incierto, el CPE pasa a `unknown` y debe
+conciliarse: el sistema no lo reemite automáticamente.
+
 ## Consola de proveedor
 
 La ruta `/oreo` es la entrada de la consola de gestión global de empresas. No es una medida de seguridad por sí sola: la API solo entrega información global cuando el JWT verificado corresponde a un correo incluido en `PLATFORM_ADMIN_EMAILS` de Render. Configura ese valor como una lista separada por comas y mantenlo fuera de Vercel, del repositorio y de los metadatos editables del usuario.
