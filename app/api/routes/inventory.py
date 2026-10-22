@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Inventory, InventoryLot, InventoryMovement, InventorySerial, InventoryTransfer, Product, Warehouse
+from app.models.entities import Branch, Inventory, InventoryLot, InventoryMovement, InventorySerial, InventoryTransfer, Product, Warehouse
 from app.schemas.inventory import InventoryLotReceive, InventoryMovementOut, InventoryOut, InventorySerialReceive, InventoryTransferCreate, InventoryTransferOut, StockAdjustment, WarehouseCreate, WarehouseOut, WarehouseUpdate
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
@@ -14,6 +14,19 @@ from app.services.stock import change_stock
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
+
+
+def _ensure_branch_in_tenant(branch_id: UUID | None, actor: Actor, db: Session) -> None:
+    """Prevent a warehouse from linking to a branch in another tenant."""
+    if branch_id is None:
+        return
+    branch = db.scalar(select(Branch.id).where(
+        Branch.id == branch_id,
+        Branch.tenant_id == actor.tenant_id,
+        Branch.is_active.is_(True),
+    ))
+    if not branch:
+        raise HTTPException(status_code=404, detail="La sucursal no existe o no pertenece a la empresa activa")
 
 
 def _tracking_product(product_id: UUID, warehouse_id: UUID, mode: str, actor: Actor, db: Session) -> Product:
@@ -50,6 +63,7 @@ def list_warehouses(actor: Actor = Depends(require_permission("inventory:read"))
 
 @router.post("/warehouses", response_model=WarehouseOut, status_code=status.HTTP_201_CREATED)
 def create_warehouse(data: WarehouseCreate, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    _ensure_branch_in_tenant(data.branch_id, actor, db)
     warehouse = Warehouse(tenant_id=actor.tenant_id, **data.model_dump())
     db.add(warehouse)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="inventory", entity="warehouse", entity_id=warehouse.id)
@@ -67,7 +81,10 @@ def update_warehouse(warehouse_id: UUID, data: WarehouseUpdate, actor: Actor = D
     warehouse = db.scalar(select(Warehouse).where(Warehouse.id == warehouse_id, Warehouse.tenant_id == actor.tenant_id))
     if not warehouse:
         raise HTTPException(status_code=404, detail="Almacén no encontrado en la empresa activa")
-    for field, value in data.model_dump(exclude_unset=True).items():
+    values = data.model_dump(exclude_unset=True)
+    if "branch_id" in values:
+        _ensure_branch_in_tenant(values["branch_id"], actor, db)
+    for field, value in values.items():
         setattr(warehouse, field, value)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update", module="inventory", entity="warehouse", entity_id=warehouse.id)
     try:

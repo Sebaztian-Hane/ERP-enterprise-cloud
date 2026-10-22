@@ -9,6 +9,9 @@ class WarehouseCreate(BaseModel):
     code: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=120)
     address: str | None = None
+    # A warehouse can remain unassigned while a tenant is being configured,
+    # but an assigned branch is always checked in the route against its tenant.
+    branch_id: UUID | None = None
 
 
 class WarehouseOut(WarehouseCreate, ORMModel):
@@ -20,6 +23,7 @@ class WarehouseUpdate(BaseModel):
     code: str | None = Field(default=None, min_length=1, max_length=40)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     address: str | None = None
+    branch_id: UUID | None = None
     is_active: bool | None = None
 
 
