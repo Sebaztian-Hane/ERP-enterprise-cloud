@@ -74,6 +74,7 @@ class SaleCreate(BaseModel):
     customer: SaleCustomerCreate | None = None
     warehouse_id: UUID
     price_list_id: UUID | None = None
+    payment_term_id: UUID | None = None
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
     due_date: date | None = None
@@ -93,6 +94,11 @@ class SaleOut(ORMModel):
     customer_id: UUID
     warehouse_id: UUID
     price_list_id: UUID | None
+    payment_term_id: UUID | None
+    payment_term_code: str | None
+    payment_term_name: str | None
+    payment_term_days_due: int | None
+    due_date: date | None
     legal_entity_id: UUID | None
     branch_id: UUID | None
     status: str
@@ -137,6 +143,7 @@ class PurchaseCreate(BaseModel):
     supplier_document_number: str | None = Field(default=None, max_length=16)
     supplier_document_date: date | None = None
     supplier_tax_amount: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+    payment_term_id: UUID | None = None
     due_date: date | None = None
 
     @model_validator(mode="after")
@@ -161,6 +168,11 @@ class PurchaseOut(ORMModel):
     supplier_document_number: str | None
     supplier_document_date: datetime | None
     supplier_tax_amount: Decimal | None
+    payment_term_id: UUID | None
+    payment_term_code: str | None
+    payment_term_name: str | None
+    payment_term_days_due: int | None
+    due_date: date | None
 
 
 class CancelTransaction(BaseModel):

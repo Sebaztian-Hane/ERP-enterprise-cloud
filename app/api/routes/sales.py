@@ -22,6 +22,7 @@ from app.services.idempotency import claim as claim_idempotency, complete as com
 from app.services.outbox import enqueue
 from app.services.operational_context import resolve_warehouse_context
 from app.services.document_sequences import allocate_document_number
+from app.services.payment_terms import resolve_payment_term
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -89,6 +90,17 @@ def list_sale_price_lists(actor: Actor = Depends(require_permission("sales:read"
           and l.valid_from <= current_date
           and (l.valid_to is null or l.valid_to >= current_date)
         order by l.code, l.name
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.get("/payment-terms")
+def list_sale_payment_terms(actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
+    """Expose only active tenant-owned terms for the commercial posting form."""
+    return db.execute(text("""
+        select id, code, name, days_due
+        from payment_terms
+        where tenant_id=:tenant and is_active=true
+        order by days_due, code, name
     """), {"tenant": str(actor.tenant_id)}).mappings().all()
 
 
@@ -370,6 +382,14 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         line.quantity * resolved_prices.get(line.product_id, line.unit_price)
         for line in data.lines
     ), Decimal("0"))
+    document_date = datetime.now(timezone.utc).date()
+    payment_term, due_date = resolve_payment_term(
+        db,
+        tenant_id=actor.tenant_id,
+        payment_term_id=data.payment_term_id,
+        supplied_due_date=data.due_date,
+        document_date=document_date,
+    )
     number = allocate_document_number(
         db, tenant_id=actor.tenant_id, module="sales", document_type="sale",
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
@@ -379,6 +399,11 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         tenant_id=actor.tenant_id, number=number, customer_id=customer_id,
         warehouse_id=data.warehouse_id,
         price_list_id=data.price_list_id,
+        payment_term_id=payment_term.id if payment_term else None,
+        payment_term_code=payment_term.code if payment_term else None,
+        payment_term_name=payment_term.name if payment_term else None,
+        payment_term_days_due=payment_term.days_due if payment_term else None,
+        due_date=due_date,
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
         branch_id=operational_context.branch.id if operational_context.branch else None,
         status="posted", total=total, note=data.note,
@@ -386,7 +411,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     db.add(sale)
     try:
         db.flush()
-        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open", due_date=data.due_date or datetime.now(timezone.utc).date()))
+        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open", due_date=due_date))
         products_by_id = {product.id: product for product in db.scalars(select(Product).where(
             Product.tenant_id == actor.tenant_id,
             Product.id.in_(product_ids),

@@ -250,6 +250,11 @@ class Sale(TimestampedTenantModel):
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
     price_list_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.id"))
+    payment_term_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("payment_terms.id"))
+    payment_term_code: Mapped[str | None] = mapped_column(String(24))
+    payment_term_name: Mapped[str | None] = mapped_column(String(120))
+    payment_term_days_due: Mapped[int | None] = mapped_column()
+    due_date: Mapped[date | None] = mapped_column()
     # Operational context is derived from the selected warehouse at posting time.
     # It is stored on the document so later warehouse reconfiguration cannot
     # alter the legal/audit context of an already posted transaction.
@@ -289,6 +294,11 @@ class Purchase(TimestampedTenantModel):
     supplier_document_number: Mapped[str | None] = mapped_column(String(16))
     supplier_document_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     supplier_tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    payment_term_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("payment_terms.id"))
+    payment_term_code: Mapped[str | None] = mapped_column(String(24))
+    payment_term_name: Mapped[str | None] = mapped_column(String(120))
+    payment_term_days_due: Mapped[int | None] = mapped_column()
+    due_date: Mapped[date | None] = mapped_column()
 
 
 class PurchaseItem(Base):

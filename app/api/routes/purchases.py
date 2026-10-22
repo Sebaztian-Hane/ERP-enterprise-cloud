@@ -1,7 +1,7 @@
 from datetime import datetime, time, timezone
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -15,6 +15,7 @@ from app.services.accounting import post_entry, reverse_entry, split_tax
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.operational_context import resolve_warehouse_context
 from app.services.document_sequences import allocate_document_number
+from app.services.payment_terms import resolve_payment_term
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -26,6 +27,17 @@ def list_purchase_warehouses(actor: Actor = Depends(require_permission("purchase
         Warehouse.tenant_id == actor.tenant_id,
         Warehouse.is_active.is_(True),
     ).order_by(Warehouse.name)).all()
+
+
+@router.get("/payment-terms")
+def list_purchase_payment_terms(actor: Actor = Depends(require_permission("purchases:read")), db: Session = Depends(get_db)):
+    """Expose active tenant-owned terms without granting configuration access."""
+    return db.execute(text("""
+        select id, code, name, days_due
+        from payment_terms
+        where tenant_id=:tenant and is_active=true
+        order by days_due, code, name
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
 
 
 @router.get("")
@@ -62,6 +74,14 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
     if not supplier or products != product_ids:
         raise HTTPException(status_code=404, detail="Proveedor, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_cost for line in data.lines), Decimal("0"))
+    document_date = data.supplier_document_date or datetime.now(timezone.utc).date()
+    payment_term, due_date = resolve_payment_term(
+        db,
+        tenant_id=actor.tenant_id,
+        payment_term_id=data.payment_term_id,
+        supplied_due_date=data.due_date,
+        document_date=document_date,
+    )
     number = allocate_document_number(
         db, tenant_id=actor.tenant_id, module="purchases", document_type="purchase",
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
@@ -75,11 +95,16 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         supplier_document_series=data.supplier_document_series, supplier_document_number=data.supplier_document_number,
         supplier_document_date=datetime.combine(data.supplier_document_date, time.min, tzinfo=timezone.utc) if data.supplier_document_date else None,
         supplier_tax_amount=data.supplier_tax_amount,
+        payment_term_id=payment_term.id if payment_term else None,
+        payment_term_code=payment_term.code if payment_term else None,
+        payment_term_name=payment_term.name if payment_term else None,
+        payment_term_days_due=payment_term.days_due if payment_term else None,
+        due_date=due_date,
     )
     db.add(purchase)
     try:
         db.flush()
-        db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=data.supplier_id, original_amount=total, balance_amount=total, status="open", due_date=data.due_date or datetime.now(timezone.utc).date()))
+        db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=data.supplier_id, original_amount=total, balance_amount=total, status="open", due_date=due_date))
         for line in data.lines:
             db.add(PurchaseItem(tenant_id=actor.tenant_id, purchase_id=purchase.id, product_id=line.product_id, quantity=line.quantity, unit_cost=line.unit_cost, line_total=line.quantity * line.unit_cost))
             stock_before = db.execute(__import__("sqlalchemy").text("select coalesce(quantity,0) from inventories where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse for update"), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or Decimal("0")
