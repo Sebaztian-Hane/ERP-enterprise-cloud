@@ -51,8 +51,10 @@ def post_entry(
         """), {"tenant": str(tenant_id), "entry": str(entry_id), "account": str(account_id), "debit": line_debit, "credit": line_credit})
 
 
-def split_tax(total: Decimal) -> tuple[Decimal, Decimal]:
-    net = (total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def split_tax(total: Decimal, rate_percent: Decimal = Decimal("18")) -> tuple[Decimal, Decimal]:
+    """Split a tax-inclusive amount using the document's immutable rate."""
+    rate = Decimal(rate_percent)
+    net = (total / (Decimal("1") + rate / Decimal("100"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return net, total - net
 
 

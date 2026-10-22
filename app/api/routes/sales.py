@@ -23,6 +23,7 @@ from app.services.outbox import enqueue
 from app.services.operational_context import resolve_warehouse_context
 from app.services.document_sequences import allocate_document_number
 from app.services.payment_terms import resolve_payment_term
+from app.services.taxes import resolve_default_tax_rate
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -224,7 +225,13 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     except APISunatError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    taxable = (sale.total / Decimal("1.18")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tax_rate_percent = Decimal(str(sale.tax_rate_percent if sale.tax_rate_percent is not None else "18"))
+    if tax_rate_percent != Decimal("18") or sale.tax_rate_code != "IGV18":
+        raise HTTPException(
+            status_code=422,
+            detail="La emisión CPE actual solo admite IGV 18 %. Configura un adaptador fiscal para otra afectación tributaria.",
+        )
+    taxable = sale.taxable_amount or (sale.total / (Decimal("1") + tax_rate_percent / Decimal("100"))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     now = datetime.now(timezone.utc)
     issue_date, issue_time = now.date().isoformat(), now.strftime("%H:%M:%S")
     file_name = f"{settings.apisunat_issuer_ruc}-{data.document_type}-{series}-{correlative}"
@@ -238,8 +245,9 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
             "address": branch.address or legal_entity.fiscal_address,
         },
         customer={"tax_id": tax_id, "name": customer.name, "address": ""},
-        lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit, "description": product.name} for item, product in items],
+        lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit_code, "description": product.name} for item, product in items],
         total=sale.total,
+        tax_rate_percent=tax_rate_percent,
     )
     # Reserve the document and its provider payload in the same transaction as
     # the outbox event. The web request never crosses the provider boundary.
@@ -383,6 +391,10 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         for line in data.lines
     ), Decimal("0"))
     document_date = datetime.now(timezone.utc).date()
+    tax_rate = resolve_default_tax_rate(
+        db, tenant_id=actor.tenant_id, document_date=document_date,
+    )
+    taxable_amount, tax_amount = split_tax(total, tax_rate.rate)
     payment_term, due_date = resolve_payment_term(
         db,
         tenant_id=actor.tenant_id,
@@ -404,6 +416,12 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         payment_term_name=payment_term.name if payment_term else None,
         payment_term_days_due=payment_term.days_due if payment_term else None,
         due_date=due_date,
+        tax_rate_id=tax_rate.id,
+        tax_rate_code=tax_rate.code,
+        tax_rate_name=tax_rate.name,
+        tax_rate_percent=tax_rate.rate,
+        taxable_amount=taxable_amount,
+        tax_amount=tax_amount,
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
         branch_id=operational_context.branch.id if operational_context.branch else None,
         status="posted", total=total, note=data.note,
@@ -424,8 +442,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
                 warehouse_id=data.warehouse_id, quantity=line.quantity, reference=number,
                 serial_numbers=line.serial_numbers,
             )
-        net, tax = split_tax(total)
-        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
+        post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), taxable_amount), ("4010", Decimal("0"), tax_amount)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
         complete_idempotency(
             db,

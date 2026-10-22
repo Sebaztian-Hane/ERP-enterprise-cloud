@@ -44,6 +44,7 @@ from app.services.audit import record
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.operational_context import resolve_warehouse_context
 from app.services.stock import change_stock
+from app.services.taxes import resolve_default_tax_rate
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -348,6 +349,10 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
             raise HTTPException(status_code=422, detail=f"El documento {number} repite un SKU")
         counterpart = _get_or_create_counterpart(module, first, actor, db)
         total = sum((line["quantity"] * line["unit_value"] for line in lines), Decimal("0"))
+        tax_rate = resolve_default_tax_rate(
+            db, tenant_id=actor.tenant_id, document_date=date.today(),
+        )
+        taxable_amount, tax_amount = split_tax(total, tax_rate.rate)
         operational_context = resolve_warehouse_context(
             db, tenant_id=actor.tenant_id, warehouse_id=warehouse.id,
         )
@@ -358,6 +363,9 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
                 branch_id=operational_context.branch.id if operational_context.branch else None,
                 status="posted", total=total, note=first["note"],
+                tax_rate_id=tax_rate.id, tax_rate_code=tax_rate.code,
+                tax_rate_name=tax_rate.name, tax_rate_percent=tax_rate.rate,
+                taxable_amount=taxable_amount, tax_amount=tax_amount,
             )
             db.add(sale); db.flush()
             db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=counterpart.id, original_amount=total, balance_amount=total, status="open", due_date=first["due_date"] or date.today()))
@@ -365,8 +373,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 product = products[line["product_sku"]]
                 db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=product.id, quantity=line["quantity"], unit_price=line["unit_value"], line_total=line["quantity"] * line["unit_value"]))
                 change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=-line["quantity"], movement_type="issue", reference=number)
-            net, tax = split_tax(total)
-            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta importada {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), net), ("4010", Decimal("0"), tax)])
+            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta importada {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0")), ("7010", Decimal("0"), taxable_amount), ("4010", Decimal("0"), tax_amount)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="sales", entity="sale", entity_id=sale.id)
         else:
             purchase = Purchase(
@@ -375,6 +382,9 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
                 branch_id=operational_context.branch.id if operational_context.branch else None,
                 status="received", total=total, note=first["note"],
+                tax_rate_id=tax_rate.id, tax_rate_code=tax_rate.code,
+                tax_rate_name=tax_rate.name, tax_rate_percent=tax_rate.rate,
+                taxable_amount=taxable_amount, tax_amount=tax_amount,
             )
             db.add(purchase); db.flush()
             db.add(AccountPayable(tenant_id=actor.tenant_id, purchase_id=purchase.id, supplier_id=counterpart.id, original_amount=total, balance_amount=total, status="open", due_date=first["due_date"] or date.today()))
@@ -382,8 +392,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 product = products[line["product_sku"]]
                 db.add(PurchaseItem(tenant_id=actor.tenant_id, purchase_id=purchase.id, product_id=product.id, quantity=line["quantity"], unit_cost=line["unit_value"], line_total=line["quantity"] * line["unit_value"]))
                 change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=line["quantity"], movement_type="receipt", reference=number)
-            net, tax = split_tax(total)
-            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra importada {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
+            post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra importada {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", taxable_amount, Decimal("0")), ("4011", tax_amount, Decimal("0")), ("4210", Decimal("0"), total)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="purchases", entity="purchase", entity_id=purchase.id)
     return len(grouped)
 

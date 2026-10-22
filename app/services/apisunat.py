@@ -10,7 +10,6 @@ import httpx
 from app.core.config import Settings
 
 
-IGV_RATE = Decimal("0.18")
 PENNY = Decimal("0.01")
 UNIT_CODES = {"unit": "NIU", "unidad": "NIU", "kg": "KGM", "g": "GRM", "l": "LTR", "m": "MTR"}
 
@@ -94,13 +93,15 @@ def amount_in_words(amount: Decimal) -> str:
     return f"{words} CON {cents:02d}/100 SOLES"
 
 
-def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, document_type: str, series: str, correlative: str, issuer: dict[str, str], customer: dict[str, str], lines: list[dict[str, Any]], total: Decimal) -> dict[str, Any]:
+def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, document_type: str, series: str, correlative: str, issuer: dict[str, str], customer: dict[str, str], lines: list[dict[str, Any]], total: Decimal, tax_rate_percent: Decimal = Decimal("18")) -> dict[str, Any]:
+    tax_rate_percent = Decimal(tax_rate_percent)
+    tax_multiplier = Decimal("1") + tax_rate_percent / Decimal("100")
     taxable_total = Decimal("0")
     tax_total = Decimal("0")
     invoice_lines: list[dict[str, Any]] = []
     for index, line in enumerate(lines, start=1):
         gross = _money(Decimal(line["quantity"]) * Decimal(line["unit_price"]))
-        taxable = _money(gross / (Decimal("1") + IGV_RATE))
+        taxable = _money(gross / tax_multiplier)
         tax = gross - taxable
         taxable_total += taxable
         tax_total += tax
@@ -108,7 +109,7 @@ def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, d
             "cbc:TaxableAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(taxable)},
             "cbc:TaxAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(tax)},
             "cac:TaxCategory": {
-                "cbc:Percent": {"_text": 18},
+                "cbc:Percent": {"_text": _json_number(tax_rate_percent)},
                 "cbc:TaxExemptionReasonCode": {"_text": "10"},
                 "cac:TaxScheme": {
                     "cbc:ID": {"_text": "1000"},

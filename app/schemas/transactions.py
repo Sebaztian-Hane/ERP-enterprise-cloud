@@ -99,6 +99,12 @@ class SaleOut(ORMModel):
     payment_term_name: str | None
     payment_term_days_due: int | None
     due_date: date | None
+    tax_rate_id: UUID | None
+    tax_rate_code: str | None
+    tax_rate_name: str | None
+    tax_rate_percent: Decimal | None
+    taxable_amount: Decimal | None
+    tax_amount: Decimal | None
     legal_entity_id: UUID | None
     branch_id: UUID | None
     status: str
@@ -173,6 +179,12 @@ class PurchaseOut(ORMModel):
     payment_term_name: str | None
     payment_term_days_due: int | None
     due_date: date | None
+    tax_rate_id: UUID | None
+    tax_rate_code: str | None
+    tax_rate_name: str | None
+    tax_rate_percent: Decimal | None
+    taxable_amount: Decimal | None
+    tax_amount: Decimal | None
 
 
 class CancelTransaction(BaseModel):

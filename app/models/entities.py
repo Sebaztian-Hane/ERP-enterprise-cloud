@@ -277,6 +277,12 @@ class Sale(TimestampedTenantModel):
     payment_term_name: Mapped[str | None] = mapped_column(String(120))
     payment_term_days_due: Mapped[int | None] = mapped_column()
     due_date: Mapped[date | None] = mapped_column()
+    tax_rate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tax_rates.id"))
+    tax_rate_code: Mapped[str | None] = mapped_column(String(24))
+    tax_rate_name: Mapped[str | None] = mapped_column(String(120))
+    tax_rate_percent: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    taxable_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     # Operational context is derived from the selected warehouse at posting time.
     # It is stored on the document so later warehouse reconfiguration cannot
     # alter the legal/audit context of an already posted transaction.
@@ -321,6 +327,12 @@ class Purchase(TimestampedTenantModel):
     payment_term_name: Mapped[str | None] = mapped_column(String(120))
     payment_term_days_due: Mapped[int | None] = mapped_column()
     due_date: Mapped[date | None] = mapped_column()
+    tax_rate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tax_rates.id"))
+    tax_rate_code: Mapped[str | None] = mapped_column(String(24))
+    tax_rate_name: Mapped[str | None] = mapped_column(String(120))
+    tax_rate_percent: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    taxable_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
 
 
 class PurchaseItem(Base):

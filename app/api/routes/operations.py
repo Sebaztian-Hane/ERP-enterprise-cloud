@@ -87,7 +87,18 @@ class MasterIn(BaseModel):
     rate: Decimal | None = Field(default=None, ge=0, le=100)
     days_due: int | None = Field(default=None, ge=0)
     symbol: str | None = Field(default=None, max_length=8)
+    valid_from: date | None = None
+    valid_to: date | None = None
+    is_default: bool = False
     is_active: bool = True
+
+    @field_validator("valid_to")
+    @classmethod
+    def master_valid_to_is_not_before_valid_from(cls, value: date | None, info) -> date | None:
+        valid_from = info.data.get("valid_from")
+        if value and valid_from and value < valid_from:
+            raise ValueError("La vigencia final no puede ser anterior a la inicial")
+        return value
 
 
 class ExchangeRateIn(BaseModel):
@@ -729,11 +740,42 @@ def create_master(resource: str, data: MasterIn, actor: Actor = Depends(require_
         values[extra] = value
         columns += f",{extra}"
         params += f",:{extra}"
+    if resource == "taxes":
+        values["valid_from"] = data.valid_from or date.today()
+        values["valid_to"] = data.valid_to
+        values["is_default"] = data.is_default
+        columns += ",valid_from,valid_to,is_default"
+        params += ",:valid_from,:valid_to,:is_default"
     try:
+        if resource == "taxes" and data.is_default:
+            # A tenant can have one effective default tax for a given date.
+            # Older defaults remain as historical records, ending the day before.
+            conflict = db.execute(text("""
+                select 1 from tax_rates
+                where tenant_id=:tenant and is_default=true and is_active=true
+                  and valid_from=:valid_from
+                limit 1
+            """), {"tenant": str(actor.tenant_id), "valid_from": values["valid_from"]}).first()
+            if conflict:
+                raise HTTPException(status_code=409, detail="Ya existe una tasa predeterminada que inicia en esa fecha")
+            db.execute(text("""
+                update tax_rates
+                set valid_to = :end_date
+                where tenant_id=:tenant and is_default=true and is_active=true
+                  and valid_from < :valid_from
+                  and (valid_to is null or valid_to >= :valid_from)
+            """), {
+                "tenant": str(actor.tenant_id),
+                "valid_from": values["valid_from"],
+                "end_date": values["valid_from"] - timedelta(days=1),
+            })
         row = db.execute(text(f"insert into {table}({columns}) values({params}) returning *"), values).mappings().one()
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create", module="configuration", entity=table, entity_id=row["id"])
         db.commit()
         return row
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="El código ya existe en este catálogo") from exc

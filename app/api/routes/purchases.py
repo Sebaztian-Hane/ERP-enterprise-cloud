@@ -16,6 +16,7 @@ from app.services.idempotency import claim as claim_idempotency, complete as com
 from app.services.operational_context import resolve_warehouse_context
 from app.services.document_sequences import allocate_document_number
 from app.services.payment_terms import resolve_payment_term
+from app.services.taxes import resolve_default_tax_rate
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -75,6 +76,9 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         raise HTTPException(status_code=404, detail="Proveedor, almacén o producto no pertenece a la empresa activa")
     total = sum((line.quantity * line.unit_cost for line in data.lines), Decimal("0"))
     document_date = data.supplier_document_date or datetime.now(timezone.utc).date()
+    tax_rate = resolve_default_tax_rate(
+        db, tenant_id=actor.tenant_id, document_date=document_date,
+    )
     payment_term, due_date = resolve_payment_term(
         db,
         tenant_id=actor.tenant_id,
@@ -100,6 +104,10 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         payment_term_name=payment_term.name if payment_term else None,
         payment_term_days_due=payment_term.days_due if payment_term else None,
         due_date=due_date,
+        tax_rate_id=tax_rate.id,
+        tax_rate_code=tax_rate.code,
+        tax_rate_name=tax_rate.name,
+        tax_rate_percent=tax_rate.rate,
     )
     db.add(purchase)
     try:
@@ -118,8 +126,11 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
                 reference=number, lot_number=line.lot_number,
                 expiration_date=line.expiration_date, serial_numbers=line.serial_numbers,
             )
-        tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else split_tax(total)[1]
+        net, calculated_tax = split_tax(total, tax_rate.rate)
+        tax = data.supplier_tax_amount if data.supplier_tax_amount is not None else calculated_tax
         net = total - tax
+        purchase.taxable_amount = net
+        purchase.tax_amount = tax
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", net, Decimal("0")), ("4011", tax, Decimal("0")), ("4210", Decimal("0"), total)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive", module="purchases", entity="purchase", entity_id=purchase.id)
         complete_idempotency(
