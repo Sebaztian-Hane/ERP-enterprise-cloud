@@ -42,7 +42,7 @@ class ProductCreate(BaseModel):
     sku: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=160)
     category_id: UUID | None = None
-    unit: str = Field(default="unit", min_length=1, max_length=16)
+    unit_id: UUID
     sale_price: Decimal = Field(default=Decimal("0"), ge=0)
     tracking_mode: Literal["none", "lot", "serial"] = "none"
     cost_method: Literal["weighted_average", "fifo"] = "weighted_average"
@@ -51,6 +51,9 @@ class ProductCreate(BaseModel):
 
 class ProductOut(ProductCreate, ORMModel):
     id: UUID
+    unit: str
+    unit_code: str
+    unit_name: str
     is_active: bool
 
 
@@ -58,7 +61,7 @@ class ProductUpdate(BaseModel):
     sku: str | None = Field(default=None, min_length=1, max_length=64)
     name: str | None = Field(default=None, min_length=1, max_length=160)
     category_id: UUID | None = None
-    unit: str | None = Field(default=None, min_length=1, max_length=16)
+    unit_id: UUID | None = None
     sale_price: Decimal | None = Field(default=None, ge=0)
     tracking_mode: Literal["none", "lot", "serial"] | None = None
     cost_method: Literal["weighted_average", "fifo"] | None = None

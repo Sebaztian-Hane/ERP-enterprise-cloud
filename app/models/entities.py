@@ -145,12 +145,34 @@ class Category(TimestampedTenantModel):
     description: Mapped[str | None] = mapped_column(Text)
 
 
+class UnitOfMeasure(Base):
+    """Tenant-owned operational/SUNAT unit of measure.
+
+    Product quantities remain meaningful only within the unit selected when the
+    product was created.  The composite FK added in migration 0043 prevents a
+    product in one tenant from ever referencing a unit belonging to another.
+    """
+
+    __tablename__ = "units_of_measure"
+    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class Product(TimestampedTenantModel):
     __tablename__ = "products"
     __table_args__ = (UniqueConstraint("tenant_id", "sku"), Index("ix_products_tenant_name", "tenant_id", "name"))
     sku: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     category_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("categories.id"))
+    unit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("units_of_measure.id"), nullable=False)
+    unit_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    unit_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Compatibility field for existing API consumers. New writes are derived
+    # from unit_code; callers must send unit_id instead of free text.
     unit: Mapped[str] = mapped_column(String(16), default="unit", nullable=False)
     sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     tracking_mode: Mapped[str] = mapped_column(String(12), default="none", nullable=False)

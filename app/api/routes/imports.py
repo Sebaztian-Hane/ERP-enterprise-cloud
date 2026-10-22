@@ -35,6 +35,7 @@ from app.models.entities import (
     Sale,
     SaleItem,
     Supplier,
+    UnitOfMeasure,
     Warehouse,
 )
 from app.security.auth import Actor, require_owner_or_admin
@@ -294,7 +295,15 @@ def _persist_master(module: str, rows: list[dict[str, Any]], actor: Actor, db: S
                 if category is None:
                     category = Category(tenant_id=actor.tenant_id, name=row["category"])
                     db.add(category); db.flush()
-            entity = Product(tenant_id=actor.tenant_id, sku=row["sku"], name=row["name"], category_id=category.id if category else None, unit=row["unit"], sale_price=row["sale_price"], average_cost=row["average_cost"])
+            unit_value = row["unit"].strip()
+            unit = db.scalar(select(UnitOfMeasure).where(
+                UnitOfMeasure.tenant_id == actor.tenant_id,
+                UnitOfMeasure.is_active.is_(True),
+                (UnitOfMeasure.code.ilike(unit_value)) | (UnitOfMeasure.name.ilike(unit_value)),
+            ))
+            if unit is None:
+                raise HTTPException(status_code=422, detail=f"Unidad no encontrada o inactiva: {unit_value}. Créala en Configuración antes de importar.")
+            entity = Product(tenant_id=actor.tenant_id, sku=row["sku"], name=row["name"], category_id=category.id if category else None, unit_id=unit.id, unit=unit.code, unit_code=unit.code, unit_name=unit.name, sale_price=row["sale_price"], average_cost=row["average_cost"])
         elif module == "customers":
             entity = Customer(tenant_id=actor.tenant_id, **row)
         elif module == "suppliers":
