@@ -418,6 +418,12 @@ class Payment(TimestampedTenantModel):
     method: Mapped[str] = mapped_column(String(32), nullable=False)
     reference: Mapped[str | None] = mapped_column(String(100))
     note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="posted", nullable=False)
+    approval_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("approval_requests.id"))
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    executed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AccountReceivable(TimestampedTenantModel):
