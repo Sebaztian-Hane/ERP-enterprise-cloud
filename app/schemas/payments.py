@@ -50,3 +50,5 @@ class PaymentOut(ORMModel):
     method: str
     reference: str | None
     note: str | None
+    status: str
+    approval_request_id: UUID | None
