@@ -1,7 +1,7 @@
 from decimal import Decimal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -10,6 +10,7 @@ from app.schemas.inventory import InventoryLotReceive, InventoryMovementOut, Inv
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.services.approval_documents import create_inventory_adjustment_evidence
 from app.services.stock import change_stock
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
@@ -246,7 +247,7 @@ def receive_serials(data: InventorySerialReceive, actor: Actor = Depends(require
     return serials
 
 
-@router.post("/adjustments", response_model=InventoryMovementOut, status_code=status.HTTP_201_CREATED)
+@router.post("/adjustments", status_code=status.HTTP_201_CREATED)
 def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
         db,
@@ -262,26 +263,22 @@ def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends
     warehouse = db.scalar(select(Warehouse).where(Warehouse.id == data.warehouse_id, Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True)))
     if not product or not warehouse:
         raise HTTPException(status_code=404, detail="Producto o almacén no encontrado en la empresa activa")
-    stock = db.scalar(select(Inventory).where(Inventory.tenant_id == actor.tenant_id, Inventory.product_id == data.product_id, Inventory.warehouse_id == data.warehouse_id).with_for_update())
-    if stock is None:
-        stock = Inventory(tenant_id=actor.tenant_id, product_id=data.product_id, warehouse_id=data.warehouse_id, quantity=Decimal("0"))
-        db.add(stock)
-    if stock.quantity + data.quantity < 0:
-        raise HTTPException(status_code=422, detail="El ajuste dejaría la existencia en negativo")
-    stock.quantity += data.quantity
-    movement = InventoryMovement(tenant_id=actor.tenant_id, product_id=data.product_id, warehouse_id=data.warehouse_id, movement_type="adjustment", quantity=data.quantity, reference=data.reference, note=data.note)
-    db.add(movement)
-    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="adjust", module="inventory", entity="inventory_movement", entity_id=movement.id)
-    db.flush()
+    row = db.execute(text("""insert into inventory_adjustment_requests(tenant_id,product_id,warehouse_id,quantity,reference,reason,note,requested_by)
+      values(:tenant,:product,:warehouse,:quantity,:reference,:reason,:note,:actor) returning *"""), {"tenant":str(actor.tenant_id),"product":str(data.product_id),"warehouse":str(data.warehouse_id),"quantity":data.quantity,"reference":data.reference,"reason":data.reason,"note":data.note,"actor":str(actor.user_id)}).mappings().one()
+    policy = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='inventory' and action='stock_adjustment' and is_active=true order by min_amount limit 1"""), {"tenant":str(actor.tenant_id)}).scalar()
+    approval_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
+      values(:tenant,:policy,'inventory','stock_adjustment','inventory_adjustment',:id,'{}'::jsonb,:actor) returning id"""), {"tenant":str(actor.tenant_id),"policy":str(policy) if policy else None,"id":str(row["id"]),"actor":str(actor.user_id)}).scalar_one()
+    db.execute(text("update inventory_adjustment_requests set approval_request_id=:approval where id=:id"),{"approval":str(approval_id),"id":str(row["id"])})
+    create_inventory_adjustment_evidence(db, tenant_id=actor.tenant_id, adjustment_id=row["id"], approval_request_id=approval_id, requested_by=actor.user_id)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="submit_adjustment", module="inventory", entity="inventory_adjustment", entity_id=row["id"])
     complete_idempotency(
         db,
         claim=idempotency,
-        response_body=InventoryMovementOut.model_validate(movement).model_dump(mode="json"),
+        response_body={"id": str(row["id"]), "status": "submitted", "approval_request_id": str(approval_id)},
         response_status=status.HTTP_201_CREATED,
     )
     db.commit()
-    db.refresh(movement)
-    return movement
+    return {"id": row["id"], "status": "submitted", "approval_request_id": approval_id}
 
 
 @router.post("/transfers", response_model=InventoryTransferOut, status_code=status.HTTP_201_CREATED)

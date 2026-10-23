@@ -228,6 +228,15 @@ def create_payment_evidence(
            "number": f"PAG-{row['number']}", "payload": serialized, "digest": digest, "requested_by": str(requested_by)}).mappings().one()
 
 
+def create_inventory_adjustment_evidence(db: Session, *, tenant_id: UUID, adjustment_id: UUID, approval_request_id: UUID, requested_by: UUID) -> dict[str, Any]:
+    row = db.execute(text("""select r.*,p.sku,p.name as product_name,w.code as warehouse_code,w.name as warehouse_name
+      from inventory_adjustment_requests r join products p on p.id=r.product_id join warehouses w on w.id=r.warehouse_id
+      where r.id=:id and r.tenant_id=:tenant"""), {"id":str(adjustment_id),"tenant":str(tenant_id)}).mappings().one()
+    serialized = canonicalize({"schema":"enterprisecloud.approval-document.v1","document_type":"inventory_adjustment","reference":row["reference"],"product":{"sku":row["sku"],"name":row["product_name"]},"warehouse":{"code":row["warehouse_code"],"name":row["warehouse_name"]},"quantity":row["quantity"],"reason":row["reason"],"note":row["note"]})
+    return db.execute(text("""insert into approval_documents(tenant_id,approval_request_id,module,entity_type,entity_id,document_number,canonical_payload,content_hash,requested_by)
+      values(:tenant,:request,'inventory','inventory_adjustment',:id,:number,cast(:payload as jsonb),:digest,:actor) returning *"""), {"tenant":str(tenant_id),"request":str(approval_request_id),"id":str(adjustment_id),"number":f"AJ-{str(adjustment_id)[:8]}","payload":serialized,"digest":sha256(serialized.encode()).hexdigest(),"actor":str(requested_by)}).mappings().one()
+
+
 def append_internal_decision_evidence(
     db: Session,
     *,

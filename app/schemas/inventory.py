@@ -32,6 +32,7 @@ class StockAdjustment(BaseModel):
     warehouse_id: UUID
     quantity: Decimal = Field(max_digits=14, decimal_places=0)
     reference: str | None = Field(default=None, max_length=100)
+    reason: str = Field(min_length=3, max_length=240)
     note: str | None = None
 
     @field_validator("quantity")
