@@ -137,3 +137,17 @@ def execute_replenishment(replenishment_id: UUID, actor: Actor = Depends(require
     db.execute(text("update petty_cash_replenishments set status='executed',executed_by=:actor,executed_at=now(),updated_at=now() where id=:id"), {"actor": str(actor.user_id), "id": str(replenishment_id)})
     post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"CCR-{row['number']}", description="Reposición de caja chica", source_type="petty_cash_replenishment", source_id=replenishment_id, lines=[("1020", Decimal(str(row["amount"])), Decimal("0")), ("1010", Decimal("0"), Decimal(str(row["amount"])))])
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="execute", module="treasury", entity="petty_cash_replenishment", entity_id=replenishment_id); db.commit(); return {"id": replenishment_id, "status": "executed"}
+
+@router.get("/petty-cash/replenishments")
+def petty_cash_replenishments(
+    status_filter: str | None = None,
+    actor: Actor = Depends(require_permission("treasury:read")),
+    db: Session = Depends(get_db),
+):
+    return db.execute(text("""
+        select r.*, f.name as fund_name, f.code as fund_code
+        from petty_cash_replenishments r
+        join petty_cash_funds f on f.id=r.fund_id and f.tenant_id=r.tenant_id
+        where r.tenant_id=:tenant and (:status is null or r.status=:status)
+        order by r.created_at desc
+    """), {"tenant": str(actor.tenant_id), "status": status_filter}).mappings().all()
