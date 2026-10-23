@@ -7,12 +7,14 @@ from sqlalchemy.orm import Session
 
 DEFAULT_ACCOUNTS = (
     ("1010", "Caja y bancos", "asset"),
+    ("1020", "Caja chica", "asset"),
     ("1210", "Cuentas por cobrar comerciales", "asset"),
     ("2010", "Inventarios", "asset"),
     ("4010", "IGV por pagar", "liability"),
     ("4011", "IGV crédito fiscal", "asset"),
     ("4210", "Cuentas por pagar comerciales", "liability"),
     ("7010", "Ventas", "income"),
+    ("6590", "Otros gastos de gestión", "expense"),
 )
 
 

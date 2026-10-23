@@ -137,6 +137,66 @@ def create_purchase_order_evidence(
     }).mappings().one()
 
 
+def create_petty_cash_evidence(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    entity_type: str,
+    entity_id: UUID,
+    approval_request_id: UUID,
+    requested_by: UUID,
+) -> dict[str, Any]:
+    """Persist a deterministic rendering of a petty-cash request for approval."""
+    if entity_type == "petty_cash_expense":
+        row = db.execute(text("""
+            select e.number, e.expense_date, e.description, e.merchant_name,
+                   e.supplier_tax_id, e.receipt_number, e.amount, e.expense_account_code,
+                   f.code as fund_code, f.name as fund_name, f.custodian_user_id
+            from petty_cash_expenses e
+            join petty_cash_funds f on f.id=e.fund_id and f.tenant_id=e.tenant_id
+            where e.id=:id and e.tenant_id=:tenant
+        """), {"id": str(entity_id), "tenant": str(tenant_id)}).mappings().one()
+        payload = {
+            "schema": "enterprisecloud.approval-document.v1", "document_type": entity_type,
+            "number": row["number"], "expense_date": row["expense_date"],
+            "fund": {"code": row["fund_code"], "name": row["fund_name"], "custodian_user_id": row["custodian_user_id"]},
+            "description": row["description"], "merchant_name": row["merchant_name"],
+            "supplier_tax_id": row["supplier_tax_id"], "receipt_number": row["receipt_number"],
+            "amount": row["amount"], "expense_account_code": row["expense_account_code"],
+        }
+    elif entity_type == "petty_cash_replenishment":
+        row = db.execute(text("""
+            select r.number, r.amount, f.code as fund_code, f.name as fund_name,
+                   f.fixed_amount, f.current_balance, f.custodian_user_id
+            from petty_cash_replenishments r
+            join petty_cash_funds f on f.id=r.fund_id and f.tenant_id=r.tenant_id
+            where r.id=:id and r.tenant_id=:tenant
+        """), {"id": str(entity_id), "tenant": str(tenant_id)}).mappings().one()
+        payload = {
+            "schema": "enterprisecloud.approval-document.v1", "document_type": entity_type,
+            "number": row["number"], "fund": {"code": row["fund_code"], "name": row["fund_name"], "custodian_user_id": row["custodian_user_id"]},
+            "amount": row["amount"], "fixed_amount": row["fixed_amount"], "balance_before_replenishment": row["current_balance"],
+        }
+    else:
+        raise ValueError("Tipo de documento de caja chica no soportado")
+    serialized = canonicalize(payload)
+    digest = sha256(serialized.encode("utf-8")).hexdigest()
+    return db.execute(text("""
+        insert into approval_documents(
+          tenant_id, approval_request_id, module, entity_type, entity_id,
+          document_number, canonical_payload, content_hash, requested_by
+        ) values (
+          :tenant, :request, 'treasury', :entity_type, :entity_id,
+          :number, cast(:payload as jsonb), :digest, :requested_by
+        ) returning *
+    """), {
+        "tenant": str(tenant_id), "request": str(approval_request_id),
+        "entity_type": entity_type, "entity_id": str(entity_id),
+        "number": f"CC-{row['number']}", "payload": serialized, "digest": digest,
+        "requested_by": str(requested_by),
+    }).mappings().one()
+
+
 def append_internal_decision_evidence(
     db: Session,
     *,
