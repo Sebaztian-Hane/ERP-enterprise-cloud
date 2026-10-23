@@ -174,8 +174,12 @@ def dispatch_sales_delivery(delivery_id: UUID, data: SalesDeliveryDispatch, requ
                 balance = Decimal(str(reservation["quantity"])) - quantity
                 if balance < 0:
                     raise HTTPException(status_code=409, detail="La reserva del pedido no cubre el despacho")
-                db.execute(text("""update stock_reservations set quantity=:quantity, status=case when :quantity=0 then 'fulfilled' else 'active' end,
-                    released_at=case when :quantity=0 then now() else null end, updated_at=now() where id=:id"""), {"quantity": balance, "id": str(reservation["id"])})
+                # quantity has a positive database check. A fully consumed
+                # reservation retains its original quantity as audit evidence
+                # and becomes non-blocking through status='fulfilled'.
+                db.execute(text("""update stock_reservations set quantity=case when :balance=0 then quantity else :balance end,
+                    status=case when :balance=0 then 'fulfilled' else 'active' end,
+                    released_at=case when :balance=0 then now() else null end, updated_at=now() where id=:id"""), {"balance": balance, "id": str(reservation["id"])})
         db.execute(text("""update sales_deliveries set status='dispatched',dispatched_by=:actor,dispatched_at=now(),updated_at=now()
             where id=:id and tenant_id=:tenant"""), {"actor": str(actor.user_id), "id": str(delivery_id), "tenant": str(actor.tenant_id)})
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="dispatch", module="inventory", entity="sales_delivery", entity_id=delivery_id, detail=delivery["number"])

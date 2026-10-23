@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Customer, Product, Supplier, Warehouse
+from app.models.entities import Customer, Inventory, Product, Supplier, Warehouse
 from app.security.auth import Actor, require_permission
 from app.schemas.transactions import PurchaseCreate, PurchaseLineCreate, SaleCreate, SaleLineCreate
 from app.api.routes.sales import post_sale
@@ -62,6 +62,60 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
 
     @router.post(prefix + "/{document_id}/status")
     def change_status(document_id: UUID, data: StatusChange, actor: Actor = Depends(require_permission(write_permission)), db: Session = Depends(get_db)):
+        if table == "sales_orders" and data.status == "confirmed":
+            order = db.execute(__import__("sqlalchemy").text("""
+                select * from sales_orders where id=:id and tenant_id=:tenant and status='draft' for update
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+            if not order:
+                raise HTTPException(status_code=409, detail="El pedido no existe, ya fue confirmado o no puede modificarse")
+            lines = db.execute(__import__("sqlalchemy").text("""
+                select product_id, quantity from sales_order_items where order_id=:id and tenant_id=:tenant order by product_id
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().all()
+            if not lines:
+                raise HTTPException(status_code=422, detail="Agrega al menos una línea antes de confirmar el pedido")
+            # Lock balances in a stable product order before reading reservations.
+            # It prevents two confirmations from consuming the same available stock.
+            for line in lines:
+                stock = db.scalar(select(Inventory).where(
+                    Inventory.tenant_id == actor.tenant_id,
+                    Inventory.product_id == line["product_id"],
+                    Inventory.warehouse_id == order["warehouse_id"],
+                ).with_for_update())
+                if stock is None:
+                    raise HTTPException(status_code=422, detail="No existe saldo disponible para uno de los productos del pedido")
+                reserved = db.execute(__import__("sqlalchemy").text("""
+                    select coalesce(sum(quantity),0) from stock_reservations
+                    where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'
+                """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]), "warehouse": str(order["warehouse_id"])}).scalar() or Decimal("0")
+                if Decimal(str(stock.quantity)) - Decimal(str(reserved)) < Decimal(str(line["quantity"])):
+                    raise HTTPException(status_code=422, detail="No hay disponibilidad suficiente para confirmar el pedido")
+            for line in lines:
+                db.execute(__import__("sqlalchemy").text("""
+                    insert into stock_reservations(tenant_id,product_id,warehouse_id,reference_type,reference_id,reference,quantity,note,created_by)
+                    values(:tenant,:product,:warehouse,'sales_order',:order,:reference,:quantity,:note,:actor)
+                """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]), "warehouse": str(order["warehouse_id"]),
+                           "order": str(document_id), "reference": order["number"], "quantity": line["quantity"],
+                           "note": f"Reserva automática del pedido {order['number']}", "actor": str(actor.user_id)})
+            row = db.execute(__import__("sqlalchemy").text("""
+                update sales_orders set status='confirmed',updated_at=now() where id=:id and tenant_id=:tenant returning *
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().one()
+            record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="confirm_and_reserve", module="sales", entity="sales_order", entity_id=document_id, detail=order["number"])
+            db.commit()
+            return row
+        if table == "sales_orders" and data.status == "cancelled":
+            row = db.execute(__import__("sqlalchemy").text("""
+                update sales_orders set status='cancelled',updated_at=now()
+                where id=:id and tenant_id=:tenant and status in ('draft','confirmed') returning *
+            """), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+            if not row:
+                raise HTTPException(status_code=409, detail="El pedido no puede cancelarse en su estado actual")
+            db.execute(__import__("sqlalchemy").text("""
+                update stock_reservations set status='released',released_at=now(),updated_at=now()
+                where tenant_id=:tenant and reference_type='sales_order' and reference_id=:order and status='active'
+            """), {"tenant": str(actor.tenant_id), "order": str(document_id)})
+            record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="cancel_and_release", module="sales", entity="sales_order", entity_id=document_id, detail=row["number"])
+            db.commit()
+            return row
         if table == "purchase_orders" and data.status == "submitted":
             order = db.execute(__import__("sqlalchemy").text("""
                 select * from purchase_orders where id=:id and tenant_id=:tenant and status='draft' for update
@@ -203,6 +257,7 @@ def order_to_sale(order_id: UUID, number: str, request: Request, actor: Actor = 
         # Only a trusted in-process handoff may suppress the issue: public
         # sales requests always retain their normal inventory behaviour.
         request.state.stock_already_issued_by_delivery = True
+    request.state.sales_order_reservation_id = order_id
     sale = post_sale(request, SaleCreate(number=number, customer_id=order["customer_id"], warehouse_id=order["warehouse_id"], lines=[SaleLineCreate(**dict(r)) for r in rows]), actor, db)
     db.execute(__import__("sqlalchemy").text("""
         update sales set sales_order_id=:order
@@ -212,6 +267,11 @@ def order_to_sale(order_id: UUID, number: str, request: Request, actor: Actor = 
         update sales_orders set status='confirmed'
         where id=:id and tenant_id=:tenant and status='confirmed'
     """), {"id":str(order_id), "tenant":str(actor.tenant_id)})
+    if not delivery_count:
+        db.execute(__import__("sqlalchemy").text("""
+            update stock_reservations set status='fulfilled',released_at=now(),updated_at=now()
+            where tenant_id=:tenant and reference_type='sales_order' and reference_id=:order and status='active'
+        """), {"tenant": str(actor.tenant_id), "order": str(order_id)})
     db.commit()
     return sale
 

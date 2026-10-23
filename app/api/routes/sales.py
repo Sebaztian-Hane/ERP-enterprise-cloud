@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
-from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, LegalEntity, Product, Sale, SaleItem, Warehouse
+from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, Inventory, LegalEntity, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
@@ -468,6 +468,25 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             Product.id.in_(product_ids),
         ).with_for_update()).all()}
         stock_already_issued = bool(getattr(request.state, "stock_already_issued_by_delivery", False))
+        own_order_id = getattr(request.state, "sales_order_reservation_id", None)
+        if not stock_already_issued:
+            # Direct sales must not consume stock already promised to a
+            # different confirmed order. A conversion from its own order may
+            # consume that order's reservation, but never another one's.
+            for line in sorted(data.lines, key=lambda item: str(item.product_id)):
+                stock = db.scalar(select(Inventory).where(
+                    Inventory.tenant_id == actor.tenant_id,
+                    Inventory.product_id == line.product_id,
+                    Inventory.warehouse_id == data.warehouse_id,
+                ).with_for_update())
+                reserved = db.execute(text("""
+                    select coalesce(sum(quantity),0) from stock_reservations
+                    where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'
+                      and (:own_order is null or not (reference_type='sales_order' and reference_id=:own_order))
+                """), {"tenant": str(actor.tenant_id), "product": str(line.product_id),
+                           "warehouse": str(data.warehouse_id), "own_order": str(own_order_id) if own_order_id else None}).scalar() or Decimal("0")
+                if stock is None or Decimal(str(stock.quantity)) - Decimal(str(reserved)) < line.quantity:
+                    raise HTTPException(status_code=422, detail="No hay stock disponible suficiente; parte de las existencias está reservada")
         for line in data.lines:
             unit_price = resolved_prices.get(line.product_id, line.unit_price)
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=unit_price, line_total=line.quantity * unit_price))
