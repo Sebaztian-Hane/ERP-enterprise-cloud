@@ -1,6 +1,6 @@
 from uuid import UUID
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -111,6 +111,23 @@ _register("/quotes", "sales_quotes", "customer_id", Customer, "sales:write", {"d
 _register("/sales-orders", "sales_orders", "customer_id", Customer, "sales:write", {"draft", "confirmed", "cancelled"})
 _register("/purchase-orders", "purchase_orders", "supplier_id", Supplier, "purchases:write", {"draft", "submitted", "cancelled"})
 
+
+@router.get("/sales-orders/{order_id}/lines")
+def list_sales_order_lines(order_id: UUID, actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
+    """Read the immutable commercial lines used to prepare a delivery."""
+    order = db.execute(__import__("sqlalchemy").text("""
+        select id from sales_orders where id=:id and tenant_id=:tenant
+    """), {"id": str(order_id), "tenant": str(actor.tenant_id)}).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido no encontrado")
+    return db.execute(__import__("sqlalchemy").text("""
+        select i.product_id, p.sku, p.name as product_name, p.tracking_mode, i.quantity, i.unit_price, i.line_total
+        from sales_order_items i
+        join products p on p.id=i.product_id and p.tenant_id=i.tenant_id
+        where i.order_id=:id and i.tenant_id=:tenant
+        order by p.name, i.id
+    """), {"id": str(order_id), "tenant": str(actor.tenant_id)}).mappings().all()
+
 def _line_endpoint(prefix: str, header: str, detail: str, key: str, value_column: str, permission: str):
     @router.post(prefix + "/{document_id}/lines", status_code=status.HTTP_201_CREATED)
     def add_line(document_id: UUID, data: WorkflowLine, actor: Actor = Depends(require_permission(permission)), db: Session = Depends(get_db)):
@@ -156,8 +173,8 @@ def quote_to_order(quote_id: UUID, number: str, warehouse_id: UUID, actor: Actor
         raise HTTPException(status_code=409, detail="No se pudo convertir la cotización") from exc
 
 @router.post("/sales-orders/{order_id}/to-sale", status_code=status.HTTP_201_CREATED)
-def order_to_sale(order_id: UUID, number: str, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
-    order = db.execute(__import__("sqlalchemy").text("select * from sales_orders where id=:id and tenant_id=:tenant and status='confirmed' for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
+def order_to_sale(order_id: UUID, number: str, request: Request, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+    order = db.execute(__import__("sqlalchemy").text("select * from sales_orders where id=:id and tenant_id=:tenant and status in ('confirmed','fulfilled') for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not order:
         raise HTTPException(status_code=409, detail="Pedido no confirmado o inexistente")
     exists = db.execute(__import__("sqlalchemy").text("""
@@ -168,7 +185,25 @@ def order_to_sale(order_id: UUID, number: str, actor: Actor = Depends(require_pe
     rows = db.execute(__import__("sqlalchemy").text("select product_id,quantity,unit_price from sales_order_items where order_id=:id and tenant_id=:tenant"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().all()
     if not rows:
         raise HTTPException(status_code=422, detail="El pedido no tiene líneas")
-    sale = post_sale(SaleCreate(number=number, customer_id=order["customer_id"], warehouse_id=order["warehouse_id"], lines=[SaleLineCreate(**dict(r)) for r in rows]), actor, db)
+    delivery_count = db.execute(__import__("sqlalchemy").text("""
+        select count(*) from sales_deliveries where tenant_id=:tenant and sales_order_id=:order and status in ('dispatched','delivered')
+    """), {"tenant": str(actor.tenant_id), "order": str(order_id)}).scalar_one()
+    if delivery_count:
+        outstanding = db.execute(__import__("sqlalchemy").text("""
+            select count(*) from sales_order_items oi
+            left join (
+                select i.product_id, sum(i.quantity) quantity from sales_delivery_items i
+                join sales_deliveries d on d.id=i.delivery_id and d.tenant_id=i.tenant_id
+                where d.tenant_id=:tenant and d.sales_order_id=:order and d.status in ('dispatched','delivered') group by i.product_id
+            ) shipped on shipped.product_id=oi.product_id
+            where oi.tenant_id=:tenant and oi.order_id=:order and coalesce(shipped.quantity,0) < oi.quantity
+        """), {"tenant": str(actor.tenant_id), "order": str(order_id)}).scalar_one()
+        if outstanding:
+            raise HTTPException(status_code=409, detail="El pedido tiene despachos parciales pendientes antes de facturarse")
+        # Only a trusted in-process handoff may suppress the issue: public
+        # sales requests always retain their normal inventory behaviour.
+        request.state.stock_already_issued_by_delivery = True
+    sale = post_sale(request, SaleCreate(number=number, customer_id=order["customer_id"], warehouse_id=order["warehouse_id"], lines=[SaleLineCreate(**dict(r)) for r in rows]), actor, db)
     db.execute(__import__("sqlalchemy").text("""
         update sales set sales_order_id=:order
         where id=:sale and tenant_id=:tenant and sales_order_id is null

@@ -467,14 +467,16 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             Product.tenant_id == actor.tenant_id,
             Product.id.in_(product_ids),
         ).with_for_update()).all()}
+        stock_already_issued = bool(getattr(request.state, "stock_already_issued_by_delivery", False))
         for line in data.lines:
             unit_price = resolved_prices.get(line.product_id, line.unit_price)
             db.add(SaleItem(tenant_id=actor.tenant_id, sale_id=sale.id, product_id=line.product_id, quantity=line.quantity, unit_price=unit_price, line_total=line.quantity * unit_price))
-            issue_tracked_stock(
-                db, tenant_id=actor.tenant_id, product=products_by_id[line.product_id],
-                warehouse_id=data.warehouse_id, quantity=line.quantity, reference=number,
-                serial_numbers=line.serial_numbers,
-            )
+            if not stock_already_issued:
+                issue_tracked_stock(
+                    db, tenant_id=actor.tenant_id, product=products_by_id[line.product_id],
+                    warehouse_id=data.warehouse_id, quantity=line.quantity, reference=number,
+                    serial_numbers=line.serial_numbers,
+                )
         post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Venta {number}", source_type="sale", source_id=sale.id, lines=[("1210", total, Decimal("0"), cost_center.id), ("7010", Decimal("0"), taxable_amount, cost_center.id), ("4010", Decimal("0"), tax_amount, cost_center.id)])
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post", module="sales", entity="sale", entity_id=sale.id)
         complete_idempotency(
@@ -508,17 +510,31 @@ def cancel_sale(sale_id: str, data: CancelTransaction, actor: Actor = Depends(re
     ))
     if electronic_document and electronic_document.status not in {"voided", "rejected", "exception"}:
         raise HTTPException(status_code=409, detail="Primero anula el comprobante electrónico antes de cancelar la venta")
-    items = db.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
-    for item in items:
+    sales_order_id = db.execute(text("""
+        select sales_order_id from sales where id=:id and tenant_id=:tenant
+    """), {"id": str(sale.id), "tenant": str(actor.tenant_id)}).scalar_one_or_none()
+    delivered_items = db.execute(text("""
+        select d.number as delivery_number, i.product_id, i.quantity
+        from sales_deliveries d
+        join sales_delivery_items i on i.delivery_id=d.id and i.tenant_id=d.tenant_id
+        where d.tenant_id=:tenant and d.sales_order_id=:order and d.status in ('dispatched','delivered')
+        order by d.created_at, d.id, i.id
+    """), {"tenant": str(actor.tenant_id), "order": str(sales_order_id)}).mappings().all() if sales_order_id else []
+    reversal_lines = delivered_items or [
+        {"delivery_number": sale.number, "product_id": item.product_id, "quantity": item.quantity}
+        for item in db.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
+    ]
+    for item in reversal_lines:
         product = db.scalar(select(Product).where(
-            Product.id == item.product_id,
+            Product.id == item["product_id"],
             Product.tenant_id == actor.tenant_id,
         ).with_for_update())
         if not product:
             raise HTTPException(status_code=409, detail="No se encontró el producto de una línea de venta")
         return_tracked_sale_stock(
             db, tenant_id=actor.tenant_id, product=product, warehouse_id=sale.warehouse_id,
-            quantity=item.quantity, sale_reference=sale.number, reversal_reference=f"CANCEL-{sale.number}",
+            quantity=Decimal(str(item["quantity"])), sale_reference=item["delivery_number"],
+            reversal_reference=f"CANCEL-{sale.number}-{item['delivery_number']}",
         )
     sale.status = "cancelled"
     account.status = "cancelled"

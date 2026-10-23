@@ -293,6 +293,10 @@ class Sale(TimestampedTenantModel):
     __tablename__ = "sales"
     __table_args__ = (UniqueConstraint("tenant_id", "number"), Index("ix_sales_tenant_created", "tenant_id", "created_at"))
     number: Mapped[str] = mapped_column(String(40), nullable=False)
+    # The column has existed since the quote/order conversion workflow.  It is
+    # mapped explicitly so fulfilment and cancellation cannot accidentally
+    # treat a delivered order as a direct, stock-issuing sale.
+    sales_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("sales_orders.id"), unique=True)
     customer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
     price_list_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("price_lists.id"))
