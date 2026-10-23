@@ -25,3 +25,10 @@ def test_default_chart_has_petty_cash_and_expense_accounts():
     source = (ROOT / "app" / "services" / "accounting.py").read_text(encoding="utf-8")
     assert '("1020", "Caja chica", "asset")' in source
     assert '("6590", "Otros gastos de gestión", "expense")' in source
+
+
+def test_adjustment_execution_requires_independent_actor_and_nonnegative_stock():
+    source = (ROOT / "app" / "api" / "routes" / "inventory.py").read_text(encoding="utf-8")
+    assert 'def execute_adjustment' in source
+    assert "La separación de funciones exige otro ejecutor" in source
+    assert "El ajuste dejaría la existencia en negativo" in source

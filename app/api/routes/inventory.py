@@ -281,6 +281,42 @@ def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends
     return {"id": row["id"], "status": "submitted", "approval_request_id": approval_id}
 
 
+@router.post("/adjustments/{adjustment_id}/execute", response_model=InventoryMovementOut)
+def execute_adjustment(adjustment_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+    adjustment = db.execute(text("""
+        select * from inventory_adjustment_requests
+        where id=:id and tenant_id=:tenant and status='approved' for update
+    """), {"id": str(adjustment_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not adjustment:
+        raise HTTPException(status_code=409, detail="El ajuste debe estar aprobado antes de ejecutarse")
+    if str(actor.user_id) in {str(adjustment["requested_by"]), str(adjustment["approved_by"])}:
+        raise HTTPException(status_code=403, detail="La separación de funciones exige otro ejecutor")
+    stock = db.scalar(select(Inventory).where(
+        Inventory.tenant_id == actor.tenant_id,
+        Inventory.product_id == adjustment["product_id"],
+        Inventory.warehouse_id == adjustment["warehouse_id"],
+    ).with_for_update())
+    try:
+        if stock is None:
+            if adjustment["quantity"] < 0:
+                raise HTTPException(status_code=422, detail="El ajuste dejaría la existencia en negativo")
+            stock = Inventory(tenant_id=actor.tenant_id, product_id=adjustment["product_id"], warehouse_id=adjustment["warehouse_id"], quantity=Decimal("0"))
+            db.add(stock)
+        if stock.quantity + adjustment["quantity"] < 0:
+            raise HTTPException(status_code=422, detail="El ajuste dejaría la existencia en negativo")
+        stock.quantity += adjustment["quantity"]
+        movement = InventoryMovement(tenant_id=actor.tenant_id, product_id=adjustment["product_id"], warehouse_id=adjustment["warehouse_id"], movement_type="adjustment", quantity=adjustment["quantity"], reference=adjustment["reference"], note=f"{adjustment['reason']}. {adjustment['note'] or ''}".strip())
+        db.add(movement); db.flush()
+        db.execute(text("""update inventory_adjustment_requests set status='executed',executed_by=:actor,executed_at=now(),inventory_movement_id=:movement,updated_at=now()
+            where id=:id and tenant_id=:tenant and status='approved'"""), {"actor":str(actor.user_id),"movement":str(movement.id),"id":str(adjustment_id),"tenant":str(actor.tenant_id)})
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="execute_adjustment", module="inventory", entity="inventory_adjustment", entity_id=adjustment_id)
+        db.commit()
+    except HTTPException:
+        db.rollback(); raise
+    db.refresh(movement)
+    return movement
+
+
 @router.post("/transfers", response_model=InventoryTransferOut, status_code=status.HTTP_201_CREATED)
 def transfer_stock(request: Request, data: InventoryTransferCreate, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
