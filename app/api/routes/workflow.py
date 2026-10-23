@@ -185,6 +185,20 @@ def order_to_purchase(order_id: UUID, number: str, actor: Actor = Depends(requir
     order = db.execute(__import__("sqlalchemy").text("select * from purchase_orders where id=:id and tenant_id=:tenant and status='approved' for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not order:
         raise HTTPException(status_code=409, detail="Orden no aprobada o inexistente")
+    approval = db.execute(__import__("sqlalchemy").text("""
+        select r.status, r.requested_by, r.decided_by,
+               coalesce(p.require_executor_separation, true) as require_executor_separation
+        from approval_requests r
+        left join approval_policies p on p.id=r.policy_id and p.tenant_id=r.tenant_id
+        where r.tenant_id=:tenant and r.entity_type='purchase_order' and r.entity_id=:id
+        order by r.created_at desc limit 1
+    """), {"id": str(order_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not approval or approval["status"] != "approved":
+        raise HTTPException(status_code=409, detail="La orden requiere una aprobación vigente antes de recibirse")
+    if approval["require_executor_separation"] and str(actor.user_id) in {
+        str(approval["requested_by"]), str(approval["decided_by"]),
+    }:
+        raise HTTPException(status_code=403, detail="La segregación de funciones exige que otra persona reciba la orden de compra")
     if db.execute(__import__("sqlalchemy").text("""
         select 1 from purchases where purchase_order_id=:id and tenant_id=:tenant
     """), {"id":str(order_id), "tenant":str(actor.tenant_id)}).first():

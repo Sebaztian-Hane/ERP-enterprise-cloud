@@ -78,6 +78,9 @@ class PolicyIn(BaseModel):
     action: str = Field(min_length=2, max_length=40)
     min_amount: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
     required_role: str = Field(default="admin", max_length=32)
+    # A sensitive operation must be performed by a third person by default:
+    # requester, approver and executor are distinct duties.
+    require_executor_separation: bool = True
     is_active: bool = True
 
 
@@ -357,9 +360,20 @@ def apply_count(count_id: UUID, request: Request, actor: Actor = Depends(require
     count = db.execute(text("select * from inventory_counts where id=:id and tenant_id=:tenant for update"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not count or count["status"] not in {"submitted", "approved"}:
         raise HTTPException(status_code=409, detail="El conteo debe estar enviado o aprobado antes de aplicarse")
-    approval = db.execute(text("select status from approval_requests where tenant_id=:tenant and entity_type='inventory_count' and entity_id=:id order by created_at desc limit 1"), {"tenant": str(actor.tenant_id), "id": str(count_id)}).scalar()
-    if approval and approval != "approved":
+    approval = db.execute(text("""
+        select r.status, r.requested_by, r.decided_by,
+               coalesce(p.require_executor_separation, true) as require_executor_separation
+        from approval_requests r
+        left join approval_policies p on p.id=r.policy_id and p.tenant_id=r.tenant_id
+        where r.tenant_id=:tenant and r.entity_type='inventory_count' and r.entity_id=:id
+        order by r.created_at desc limit 1
+    """), {"tenant": str(actor.tenant_id), "id": str(count_id)}).mappings().first()
+    if approval and approval["status"] != "approved":
         raise HTTPException(status_code=409, detail="El inventario físico requiere una aprobación antes de aplicarse")
+    if approval and approval["require_executor_separation"] and str(actor.user_id) in {
+        str(approval["requested_by"]), str(approval["decided_by"]),
+    }:
+        raise HTTPException(status_code=403, detail="La segregación de funciones exige que otra persona aplique el inventario físico")
     lines = db.execute(text("select * from inventory_count_lines where inventory_count_id=:id and tenant_id=:tenant order by product_id"), {"id": str(count_id), "tenant": str(actor.tenant_id)}).mappings().all()
     for line in lines:
         # Serialize the reconciliation with every regular stock mutation.  The
@@ -427,8 +441,8 @@ def approval_policies(actor: Actor = Depends(require_permission("approvals:read"
 
 @router.post("/approvals/policies", status_code=status.HTTP_201_CREATED)
 def create_policy(data: PolicyIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
-    row = db.execute(text("""insert into approval_policies(tenant_id,module,action,min_amount,required_role,is_active)
-       values(:tenant,:module,:action,:amount,:role,:active) returning *"""), {"tenant": str(actor.tenant_id), "module": data.module, "action": data.action, "amount": data.min_amount, "role": data.required_role, "active": data.is_active}).mappings().one()
+    row = db.execute(text("""insert into approval_policies(tenant_id,module,action,min_amount,required_role,require_executor_separation,is_active)
+       values(:tenant,:module,:action,:amount,:role,:separate_executor,:active) returning *"""), {"tenant": str(actor.tenant_id), "module": data.module, "action": data.action, "amount": data.min_amount, "role": data.required_role, "separate_executor": data.require_executor_separation, "active": data.is_active}).mappings().one()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_policy", module="approvals", entity="approval_policy", entity_id=row["id"])
     db.commit(); return row
 
@@ -525,6 +539,12 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
     append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='approved' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
+    elif row["entity_type"] == "inventory_count":
+        db.execute(text("""
+            update inventory_counts
+            set status='approved', approved_by=:actor, updated_at=now()
+            where id=:id and tenant_id=:tenant and status='submitted'
+        """), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id), "actor": str(actor.user_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
@@ -543,6 +563,11 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
     append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='cancelled' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
+    elif row["entity_type"] == "inventory_count":
+        db.execute(text("""
+            update inventory_counts set status='cancelled', updated_at=now()
+            where id=:id and tenant_id=:tenant and status='submitted'
+        """), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
