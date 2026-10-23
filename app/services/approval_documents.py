@@ -197,6 +197,37 @@ def create_petty_cash_evidence(
     }).mappings().one()
 
 
+def create_payment_evidence(
+    db: Session, *, tenant_id: UUID, payment_id: UUID, approval_request_id: UUID, requested_by: UUID,
+) -> dict[str, Any]:
+    row = db.execute(text("""
+        select p.number,p.amount,p.method,p.reference,p.note,s.name as supplier_name,c.name as cash_account_name
+        from payments p join suppliers s on s.id=p.supplier_id and s.tenant_id=p.tenant_id
+        join cash_accounts c on c.id=p.cash_account_id and c.tenant_id=p.tenant_id
+        where p.id=:id and p.tenant_id=:tenant and p.payment_type='payment'
+    """), {"id": str(payment_id), "tenant": str(tenant_id)}).mappings().one()
+    allocations = db.execute(text("""
+        select a.amount, ap.purchase_id from payment_allocations a
+        join accounts_payable ap on ap.id=a.payable_id and ap.tenant_id=a.tenant_id
+        where a.payment_id=:payment and a.tenant_id=:tenant order by a.id
+    """), {"payment": str(payment_id), "tenant": str(tenant_id)}).mappings().all()
+    payload = {
+        "schema": "enterprisecloud.approval-document.v1", "document_type": "supplier_payment",
+        "number": row["number"], "supplier": row["supplier_name"], "amount": row["amount"],
+        "method": row["method"], "reference": row["reference"], "note": row["note"],
+        "cash_account": row["cash_account_name"],
+        "allocations": [{"purchase_id": item["purchase_id"], "amount": item["amount"]} for item in allocations],
+    }
+    serialized = canonicalize(payload)
+    digest = sha256(serialized.encode("utf-8")).hexdigest()
+    return db.execute(text("""
+        insert into approval_documents(tenant_id,approval_request_id,module,entity_type,entity_id,document_number,canonical_payload,content_hash,requested_by)
+        values(:tenant,:request,'payments','supplier_payment',:payment,:number,cast(:payload as jsonb),:digest,:requested_by)
+        returning *
+    """), {"tenant": str(tenant_id), "request": str(approval_request_id), "payment": str(payment_id),
+           "number": f"PAG-{row['number']}", "payload": serialized, "digest": digest, "requested_by": str(requested_by)}).mappings().one()
+
+
 def append_internal_decision_evidence(
     db: Session,
     *,

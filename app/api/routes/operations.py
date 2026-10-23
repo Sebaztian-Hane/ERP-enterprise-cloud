@@ -555,6 +555,9 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
             update petty_cash_replenishments set status='approved', approved_by=:actor, updated_at=now()
             where id=:id and tenant_id=:tenant and status='submitted'
         """), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id), "actor": str(actor.user_id)})
+    elif row["entity_type"] == "supplier_payment":
+        db.execute(text("""update payments set status='approved',approved_by=:actor,updated_at=now()
+            where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id), "actor": str(actor.user_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
@@ -588,6 +591,9 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
             update petty_cash_replenishments set status='rejected', updated_at=now()
             where id=:id and tenant_id=:tenant and status='submitted'
         """), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
+    elif row["entity_type"] == "supplier_payment":
+        db.execute(text("""update payments set status='rejected',updated_at=now()
+            where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
