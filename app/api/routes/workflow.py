@@ -145,7 +145,10 @@ def quote_to_order(quote_id: UUID, number: str, warehouse_id: UUID, actor: Actor
     try:
         order = db.execute(__import__("sqlalchemy").text("insert into sales_orders(tenant_id,number,customer_id,warehouse_id,quote_id,total) values(:tenant,:number,:customer,:warehouse,:quote,:total) returning id"), {"tenant":str(actor.tenant_id),"number":number,"customer":quote["customer_id"],"warehouse":str(warehouse_id),"quote":str(quote_id),"total":quote["total"]}).scalar_one()
         db.execute(__import__("sqlalchemy").text("insert into sales_order_items(tenant_id,order_id,product_id,quantity,unit_price,line_total) select tenant_id,:order,product_id,quantity,unit_price,line_total from sales_quote_items where quote_id=:quote and tenant_id=:tenant"), {"order":str(order),"quote":str(quote_id),"tenant":str(actor.tenant_id)})
-        db.execute(__import__("sqlalchemy").text("update sales_quotes set sales_order_id=:order where id=:quote"), {"order":str(order),"quote":str(quote_id)})
+        db.execute(__import__("sqlalchemy").text("""
+            update sales_quotes set sales_order_id=:order
+            where id=:quote and tenant_id=:tenant and sales_order_id is null
+        """), {"order":str(order),"quote":str(quote_id),"tenant":str(actor.tenant_id)})
         db.commit()
         return {"sales_order_id": order}
     except Exception as exc:
@@ -157,15 +160,23 @@ def order_to_sale(order_id: UUID, number: str, actor: Actor = Depends(require_pe
     order = db.execute(__import__("sqlalchemy").text("select * from sales_orders where id=:id and tenant_id=:tenant and status='confirmed' for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not order:
         raise HTTPException(status_code=409, detail="Pedido no confirmado o inexistente")
-    exists = db.execute(__import__("sqlalchemy").text("select 1 from sales where sales_order_id=:id"), {"id":str(order_id)}).first()
+    exists = db.execute(__import__("sqlalchemy").text("""
+        select 1 from sales where sales_order_id=:id and tenant_id=:tenant
+    """), {"id":str(order_id), "tenant":str(actor.tenant_id)}).first()
     if exists:
         raise HTTPException(status_code=409, detail="El pedido ya fue convertido")
     rows = db.execute(__import__("sqlalchemy").text("select product_id,quantity,unit_price from sales_order_items where order_id=:id and tenant_id=:tenant"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().all()
     if not rows:
         raise HTTPException(status_code=422, detail="El pedido no tiene líneas")
     sale = post_sale(SaleCreate(number=number, customer_id=order["customer_id"], warehouse_id=order["warehouse_id"], lines=[SaleLineCreate(**dict(r)) for r in rows]), actor, db)
-    db.execute(__import__("sqlalchemy").text("update sales set sales_order_id=:order where id=:sale"), {"order":str(order_id),"sale":str(sale.id)})
-    db.execute(__import__("sqlalchemy").text("update sales_orders set status='confirmed' where id=:id"), {"id":str(order_id)})
+    db.execute(__import__("sqlalchemy").text("""
+        update sales set sales_order_id=:order
+        where id=:sale and tenant_id=:tenant and sales_order_id is null
+    """), {"order":str(order_id),"sale":str(sale.id),"tenant":str(actor.tenant_id)})
+    db.execute(__import__("sqlalchemy").text("""
+        update sales_orders set status='confirmed'
+        where id=:id and tenant_id=:tenant and status='confirmed'
+    """), {"id":str(order_id), "tenant":str(actor.tenant_id)})
     db.commit()
     return sale
 
@@ -174,12 +185,17 @@ def order_to_purchase(order_id: UUID, number: str, actor: Actor = Depends(requir
     order = db.execute(__import__("sqlalchemy").text("select * from purchase_orders where id=:id and tenant_id=:tenant and status='approved' for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not order:
         raise HTTPException(status_code=409, detail="Orden no aprobada o inexistente")
-    if db.execute(__import__("sqlalchemy").text("select 1 from purchases where purchase_order_id=:id"), {"id":str(order_id)}).first():
+    if db.execute(__import__("sqlalchemy").text("""
+        select 1 from purchases where purchase_order_id=:id and tenant_id=:tenant
+    """), {"id":str(order_id), "tenant":str(actor.tenant_id)}).first():
         raise HTTPException(status_code=409, detail="La orden ya fue convertida")
     rows = db.execute(__import__("sqlalchemy").text("select product_id,quantity,unit_cost from purchase_order_items where purchase_order_id=:id and tenant_id=:tenant"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().all()
     if not rows:
         raise HTTPException(status_code=422, detail="La orden no tiene líneas")
     purchase = receive_purchase(PurchaseCreate(number=number, supplier_id=order["supplier_id"], warehouse_id=order["warehouse_id"], lines=[PurchaseLineCreate(**dict(r)) for r in rows]), actor, db)
-    db.execute(__import__("sqlalchemy").text("update purchases set purchase_order_id=:order where id=:purchase"), {"order":str(order_id),"purchase":str(purchase.id)})
+    db.execute(__import__("sqlalchemy").text("""
+        update purchases set purchase_order_id=:order
+        where id=:purchase and tenant_id=:tenant and purchase_order_id is null
+    """), {"order":str(order_id),"purchase":str(purchase.id),"tenant":str(actor.tenant_id)})
     db.commit()
     return purchase

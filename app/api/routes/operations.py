@@ -406,7 +406,14 @@ def apply_count(count_id: UUID, request: Request, actor: Actor = Depends(require
                 values(:tenant,:product,:warehouse,'adjustment',:quantity,:reference,:note)
             """), {"tenant": str(actor.tenant_id), "product": str(line["product_id"]), "warehouse": str(count["warehouse_id"]), "quantity": variance,
                    "reference": count["number"], "note": f"Inventario físico: {count['reason']}"})
-    row = db.execute(text("update inventory_counts set status='applied', applied_by=:actor, applied_at=now(), updated_at=now() where id=:id returning *"), {"id": str(count_id), "actor": str(actor.user_id)}).mappings().one()
+    row = db.execute(text("""
+        update inventory_counts
+        set status='applied', applied_by=:actor, applied_at=now(), updated_at=now()
+        where id=:id and tenant_id=:tenant and status in ('submitted', 'approved')
+        returning *
+    """), {
+        "id": str(count_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id),
+    }).mappings().one()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="apply", module="inventory", entity="inventory_count", entity_id=count_id)
     complete_idempotency(db, claim=idempotency, response_body=dict(row), response_status=status.HTTP_200_OK)
     db.commit()
@@ -495,7 +502,11 @@ def _verify_decision_signature(request_id: UUID, data: DecisionIn, decision: str
         verify_p256_signature(public_jwk=challenge["public_jwk"], message=message, signature_b64=data.signature)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    db.execute(text("update approval_signature_challenges set used_at=now() where id=:id and used_at is null"), {"id": str(challenge["id"])})
+    db.execute(text("""
+        update approval_signature_challenges
+        set used_at=now()
+        where id=:id and tenant_id=:tenant and used_at is null
+    """), {"id": str(challenge["id"]), "tenant": str(actor.tenant_id)})
     return {"signed_hash": message_hash(message), "signing_key_id": data.signing_key_id, "signature_value": data.signature}
 
 
