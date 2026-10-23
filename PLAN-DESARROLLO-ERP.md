@@ -106,6 +106,10 @@ consumidor se ejecuta dentro del API; un worker separado sigue pendiente.
       exportaciones; incluir ataques con otro `tenant_id`.
 - [ ] Validar segregación de funciones: creador, aprobador y ejecutor no deben
       coincidir cuando la política lo prohíba.
+      Base implementada para inventarios físicos y órdenes de compra: la
+      política puede exigir un ejecutor distinto y el sistema conserva
+      solicitante, aprobador y ejecutor. Falta extenderla a ajustes de stock,
+      pagos y demás comandos de alto riesgo antes de cerrar este punto.
 - [ ] Añadir MFA y reautenticación para dueño, administrador, tesorería,
       contabilidad, gestión de claves y acciones irreversibles.
 - [ ] Añadir revocación de sesiones, gestión/rotación/revocación de llaves de
