@@ -25,7 +25,7 @@ def test_quantity_models_reject_decimal_units(factory, payload):
 
 
 def test_stock_adjustment_accepts_negative_whole_units():
-    adjustment = StockAdjustment(product_id=uuid4(), warehouse_id=uuid4(), quantity="-3")
+    adjustment = StockAdjustment(product_id=uuid4(), warehouse_id=uuid4(), quantity="-3", reason="Corrección de conteo físico")
     assert adjustment.quantity == -3
 
 
