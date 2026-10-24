@@ -15,6 +15,7 @@ class TenantOut(ORMModel):
     id: UUID
     name: str
     timezone: str
+    business_profile: str
     is_active: bool
 
 
@@ -25,11 +26,13 @@ class PlatformTenantOut(TenantOut):
 
 class PlatformTenantUpdate(BaseModel):
     is_active: bool
+    business_profile: str | None = Field(default=None, pattern=r"^(retail|wholesale|hybrid)$")
 
 
 class PlatformTenantCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     timezone: str = Field(default="America/Mexico_City", min_length=3, max_length=64)
+    business_profile: str = Field(default="hybrid", pattern=r"^(retail|wholesale|hybrid)$")
     owner_email: EmailStr
     temporary_password: str = Field(min_length=12, max_length=128)
     issuer_ruc: str = Field(pattern=r"^\d{11}$")

@@ -23,7 +23,7 @@ from app.services.apisunat_credentials import encrypt_persona_token
 
 router = APIRouter(prefix="/platform", tags=["platform"])
 MODULES = [
-    ("sales", "Ventas"), ("customers", "Clientes"), ("quotes", "Cotizaciones"),
+    ("sales", "Ventas"), ("pos", "Punto de venta"), ("customers", "Clientes"), ("quotes", "Cotizaciones"),
     ("sales_orders", "Pedidos de venta"), ("purchases", "Compras"),
     ("suppliers", "Proveedores"), ("purchase_orders", "Órdenes de compra"),
     ("inventory", "Inventario"), ("products", "Productos"), ("finance", "Finanzas"),
@@ -31,6 +31,11 @@ MODULES = [
     ("operations", "Control operativo"), ("administration", "Administración"),
 ]
 MODULE_CODES = {code for code, _ in MODULES}
+PROFILE_BLOCKED_MODULES = {
+    "retail": {"quotes", "sales_orders"},
+    "wholesale": {"pos"},
+    "hybrid": set(),
+}
 
 
 def tenant_payload(tenant: Tenant, active_members: int) -> PlatformTenantOut:
@@ -38,6 +43,7 @@ def tenant_payload(tenant: Tenant, active_members: int) -> PlatformTenantOut:
         id=tenant.id,
         name=tenant.name,
         timezone=tenant.timezone,
+        business_profile=tenant.business_profile,
         is_active=tenant.is_active,
         created_at=tenant.created_at,
         active_members=active_members,
@@ -76,6 +82,8 @@ def update_platform_tenant(
     if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
     tenant.is_active = data.is_active
+    if data.business_profile is not None:
+        tenant.business_profile = data.business_profile
     record(
         db,
         tenant_id=tenant.id,
@@ -104,7 +112,7 @@ async def create_platform_tenant(request: Request, response: Response, data: Pla
     # The plaintext is intentionally discarded immediately after ciphertext is made.
     persona_token_ciphertext = encrypt_persona_token(data.apisunat_persona_token)
     user_id = await create_user(get_settings(), email=str(data.owner_email), temporary_password=data.temporary_password)
-    tenant = Tenant(name=data.name.strip(), timezone=data.timezone)
+    tenant = Tenant(name=data.name.strip(), timezone=data.timezone, business_profile=data.business_profile)
     db.add(tenant); db.flush()
     legal_entity = LegalEntity(
         tenant_id=tenant.id, code="PRINCIPAL", legal_name=data.name.strip(),
@@ -129,7 +137,8 @@ def get_tenant_apisunat_credentials(
     _: PlatformActor = Depends(require_platform_admin),
     db: Session = Depends(get_db),
 ):
-    if not db.get(Tenant, tenant_id):
+    tenant = db.get(Tenant, tenant_id)
+    if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
     credentials = {
         row.legal_entity_id: row
@@ -204,7 +213,8 @@ def upsert_tenant_apisunat_credential(
 
 @router.get("/tenants/{tenant_id}/module-access")
 def get_module_access(tenant_id: UUID, _: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
-    if not db.get(Tenant, tenant_id):
+    tenant = db.get(Tenant, tenant_id)
+    if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
     tenant_settings = {row.module_code: row.is_enabled for row in db.scalars(select(TenantModuleSetting).where(TenantModuleSetting.tenant_id == tenant_id))}
     members = db.scalars(select(TenantMembership).where(TenantMembership.tenant_id == tenant_id).order_by(TenantMembership.created_at)).all()
@@ -213,7 +223,8 @@ def get_module_access(tenant_id: UUID, _: PlatformActor = Depends(require_platfo
     for setting in overrides:
         by_member.setdefault(str(setting.membership_id), {})[setting.module_code] = setting.is_enabled
     return {
-        "modules": [{"code": code, "label": label, "is_enabled": tenant_settings.get(code, True)} for code, label in MODULES],
+        "business_profile": tenant.business_profile,
+        "modules": [{"code": code, "label": label, "is_available": code not in PROFILE_BLOCKED_MODULES[tenant.business_profile], "is_enabled": tenant_settings.get(code, True) and code not in PROFILE_BLOCKED_MODULES[tenant.business_profile]} for code, label in MODULES],
         "members": [{"id": str(member.id), "user_id": str(member.user_id), "role_code": member.role_code, "is_active": member.is_active, "overrides": by_member.get(str(member.id), {})} for member in members],
     }
 
@@ -222,8 +233,11 @@ def get_module_access(tenant_id: UUID, _: PlatformActor = Depends(require_platfo
 def update_tenant_module(tenant_id: UUID, data: ModuleToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
     if data.module_code not in MODULE_CODES:
         raise HTTPException(status_code=422, detail="Módulo no válido")
-    if not db.get(Tenant, tenant_id):
+    tenant = db.get(Tenant, tenant_id)
+    if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    if data.is_enabled and data.module_code in PROFILE_BLOCKED_MODULES[tenant.business_profile]:
+        raise HTTPException(status_code=422, detail="Este módulo no corresponde al perfil operativo de la empresa")
     setting = db.get(TenantModuleSetting, {"tenant_id": tenant_id, "module_code": data.module_code})
     if setting: setting.is_enabled = data.is_enabled
     else: db.add(TenantModuleSetting(tenant_id=tenant_id, module_code=data.module_code, is_enabled=data.is_enabled))
@@ -235,6 +249,11 @@ def update_tenant_module(tenant_id: UUID, data: ModuleToggle, actor: PlatformAct
 def update_member_module(tenant_id: UUID, membership_id: UUID, data: ModuleToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
     if data.module_code not in MODULE_CODES:
         raise HTTPException(status_code=422, detail="Módulo no válido")
+    tenant = db.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    if data.is_enabled and data.module_code in PROFILE_BLOCKED_MODULES[tenant.business_profile]:
+        raise HTTPException(status_code=422, detail="Este módulo no corresponde al perfil operativo de la empresa")
     membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == tenant_id))
     if not membership:
         raise HTTPException(status_code=404, detail="Usuario no encontrado en esta empresa")

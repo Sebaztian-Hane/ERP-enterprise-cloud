@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.entities import MembershipModuleSetting, TenantMembership, TenantModuleSetting
+from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting
 
 
 class Actor(BaseModel):
@@ -120,7 +120,17 @@ PERMISSION_MODULES = {
 }
 
 
+PROFILE_BLOCKED_MODULES = {
+    "retail": {"quotes", "sales_orders"},
+    "wholesale": {"pos"},
+    "hybrid": set(),
+}
+
+
 def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
+    tenant = db.get(Tenant, actor.tenant_id)
+    if not tenant or module_code in PROFILE_BLOCKED_MODULES.get(tenant.business_profile, set()):
+        return False
     tenant_setting = db.get(TenantModuleSetting, {"tenant_id": actor.tenant_id, "module_code": module_code})
     if tenant_setting and not tenant_setting.is_enabled:
         return False
@@ -136,15 +146,24 @@ def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
     return member_setting.is_enabled if member_setting else True
 
 
-def require_permission(permission: str):
+def require_permission(permission: str, module_code: str | None = None):
     def check(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:
         granted = ROLE_PERMISSIONS.get(actor.role_code, set())
         if "*" not in granted and permission not in granted:
             raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
-        module_code = PERMISSION_MODULES.get(permission.split(":", 1)[0])
+        effective_module_code = module_code or PERMISSION_MODULES.get(permission.split(":", 1)[0])
         # Direct unit calls exercise role semantics without FastAPI resolving
         # dependency objects. Real requests always receive a Session here.
-        if module_code and hasattr(db, "get") and not module_is_enabled(db, actor, module_code):
+        if effective_module_code and hasattr(db, "get") and not module_is_enabled(db, actor, effective_module_code):
+            raise HTTPException(status_code=403, detail="Este módulo no está habilitado para su acceso")
+        return actor
+    return check
+
+
+def require_module(module_code: str):
+    """Require an additional tenant module without weakening role permissions."""
+    def check(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:
+        if not module_is_enabled(db, actor, module_code):
             raise HTTPException(status_code=403, detail="Este módulo no está habilitado para su acceso")
         return actor
     return check

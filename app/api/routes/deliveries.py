@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Inventory, Product
 from app.schemas.deliveries import SalesDeliveryCreate, SalesDeliveryDispatch
-from app.security.auth import Actor, require_permission
+from app.security.auth import Actor, require_module, require_permission
 from app.services.audit import record
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.services.traceability import issue_tracked_stock
@@ -46,7 +46,7 @@ def _delivery_payload(db: Session, *, tenant_id: UUID, delivery_id: UUID) -> dic
 
 @router.get("")
 def list_sales_deliveries(
-    actor: Actor = Depends(require_permission("sales:read")),
+    actor: Actor = Depends(require_permission("sales:read", "sales_orders")),
     db: Session = Depends(get_db),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
@@ -77,12 +77,12 @@ def list_sales_deliveries(
 
 
 @router.get("/{delivery_id}")
-def get_sales_delivery(delivery_id: UUID, actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
+def get_sales_delivery(delivery_id: UUID, actor: Actor = Depends(require_permission("sales:read", "sales_orders")), db: Session = Depends(get_db)):
     return _delivery_payload(db, tenant_id=actor.tenant_id, delivery_id=delivery_id)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_sales_delivery(request: Request, data: SalesDeliveryCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def create_sales_delivery(request: Request, data: SalesDeliveryCreate, actor: Actor = Depends(require_permission("sales:write")), _: Actor = Depends(require_module("sales_orders")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
         operation="sales.deliveries.create", key=request.headers.get("Idempotency-Key"), payload=data.model_dump(mode="json"))
     if idempotency and idempotency.is_replay:
@@ -132,7 +132,7 @@ def create_sales_delivery(request: Request, data: SalesDeliveryCreate, actor: Ac
 
 
 @router.post("/{delivery_id}/dispatch")
-def dispatch_sales_delivery(delivery_id: UUID, data: SalesDeliveryDispatch, request: Request, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def dispatch_sales_delivery(delivery_id: UUID, data: SalesDeliveryDispatch, request: Request, actor: Actor = Depends(require_permission("inventory:write")), _: Actor = Depends(require_module("sales_orders")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
         operation="sales.deliveries.dispatch", key=request.headers.get("Idempotency-Key"), payload={"delivery_id": str(delivery_id), **data.model_dump(mode="json")})
     if idempotency and idempotency.is_replay:
@@ -193,7 +193,7 @@ def dispatch_sales_delivery(delivery_id: UUID, data: SalesDeliveryDispatch, requ
 
 
 @router.post("/{delivery_id}/deliver")
-def mark_sales_delivery_delivered(delivery_id: UUID, request: Request, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def mark_sales_delivery_delivered(delivery_id: UUID, request: Request, actor: Actor = Depends(require_permission("sales:write")), _: Actor = Depends(require_module("sales_orders")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
         operation="sales.deliveries.deliver", key=request.headers.get("Idempotency-Key"), payload={"delivery_id": str(delivery_id)})
     if idempotency and idempotency.is_replay:
@@ -222,7 +222,7 @@ def mark_sales_delivery_delivered(delivery_id: UUID, request: Request, actor: Ac
 
 
 @router.post("/{delivery_id}/cancel")
-def cancel_sales_delivery(delivery_id: UUID, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def cancel_sales_delivery(delivery_id: UUID, actor: Actor = Depends(require_permission("sales:write")), _: Actor = Depends(require_module("sales_orders")), db: Session = Depends(get_db)):
     row = db.execute(text("""update sales_deliveries set status='cancelled',updated_at=now()
         where id=:id and tenant_id=:tenant and status='draft' returning *"""), {"id": str(delivery_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not row:

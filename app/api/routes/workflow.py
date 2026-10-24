@@ -36,13 +36,13 @@ class WorkflowLine(BaseModel):
             raise ValueError("La cantidad debe ser un número entero")
         return value
 
-def _register(prefix: str, table: str, counterparty: str, counterparty_model, write_permission: str, allowed: set[str]):
+def _register(prefix: str, table: str, counterparty: str, counterparty_model, write_permission: str, allowed: set[str], module_code: str | None = None):
     @router.get(prefix)
-    def list_docs(actor: Actor = Depends(require_permission(write_permission.replace(":write", ":read"))), db: Session = Depends(get_db)):
+    def list_docs(actor: Actor = Depends(require_permission(write_permission.replace(":write", ":read"), module_code)), db: Session = Depends(get_db)):
         return db.execute(select(__import__("sqlalchemy").text("*")).select_from(__import__("sqlalchemy").text(table)).where(__import__("sqlalchemy").text("tenant_id = :tenant")).params(tenant=str(actor.tenant_id))).mappings().all()
 
     @router.post(prefix, status_code=status.HTTP_201_CREATED)
-    def create_doc(data: WorkflowCreate, actor: Actor = Depends(require_permission(write_permission)), db: Session = Depends(get_db)):
+    def create_doc(data: WorkflowCreate, actor: Actor = Depends(require_permission(write_permission, module_code)), db: Session = Depends(get_db)):
         if prefix != "/quotes" and not data.warehouse_id:
             raise HTTPException(status_code=422, detail="El almacén es obligatorio")
         counterpart = db.scalar(select(counterparty_model.id).where(counterparty_model.id == data.counterparty_id, counterparty_model.tenant_id == actor.tenant_id, counterparty_model.is_active.is_(True)))
@@ -61,7 +61,7 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
             raise HTTPException(status_code=409, detail="Número duplicado o referencia inválida") from exc
 
     @router.post(prefix + "/{document_id}/status")
-    def change_status(document_id: UUID, data: StatusChange, actor: Actor = Depends(require_permission(write_permission)), db: Session = Depends(get_db)):
+    def change_status(document_id: UUID, data: StatusChange, actor: Actor = Depends(require_permission(write_permission, module_code)), db: Session = Depends(get_db)):
         if table == "sales_orders" and data.status == "confirmed":
             order = db.execute(__import__("sqlalchemy").text("""
                 select * from sales_orders where id=:id and tenant_id=:tenant and status='draft' for update
@@ -161,13 +161,13 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
         db.commit()
         return row
 
-_register("/quotes", "sales_quotes", "customer_id", Customer, "sales:write", {"draft", "approved", "cancelled"})
-_register("/sales-orders", "sales_orders", "customer_id", Customer, "sales:write", {"draft", "confirmed", "cancelled"})
+_register("/quotes", "sales_quotes", "customer_id", Customer, "sales:write", {"draft", "approved", "cancelled"}, "quotes")
+_register("/sales-orders", "sales_orders", "customer_id", Customer, "sales:write", {"draft", "confirmed", "cancelled"}, "sales_orders")
 _register("/purchase-orders", "purchase_orders", "supplier_id", Supplier, "purchases:write", {"draft", "submitted", "cancelled"})
 
 
 @router.get("/sales-orders/{order_id}/lines")
-def list_sales_order_lines(order_id: UUID, actor: Actor = Depends(require_permission("sales:read")), db: Session = Depends(get_db)):
+def list_sales_order_lines(order_id: UUID, actor: Actor = Depends(require_permission("sales:read", "sales_orders")), db: Session = Depends(get_db)):
     """Read the immutable commercial lines used to prepare a delivery."""
     order = db.execute(__import__("sqlalchemy").text("""
         select id from sales_orders where id=:id and tenant_id=:tenant
@@ -182,9 +182,9 @@ def list_sales_order_lines(order_id: UUID, actor: Actor = Depends(require_permis
         order by p.name, i.id
     """), {"id": str(order_id), "tenant": str(actor.tenant_id)}).mappings().all()
 
-def _line_endpoint(prefix: str, header: str, detail: str, key: str, value_column: str, permission: str):
+def _line_endpoint(prefix: str, header: str, detail: str, key: str, value_column: str, permission: str, module_code: str | None = None):
     @router.post(prefix + "/{document_id}/lines", status_code=status.HTTP_201_CREATED)
-    def add_line(document_id: UUID, data: WorkflowLine, actor: Actor = Depends(require_permission(permission)), db: Session = Depends(get_db)):
+    def add_line(document_id: UUID, data: WorkflowLine, actor: Actor = Depends(require_permission(permission, module_code)), db: Session = Depends(get_db)):
         header_row = db.execute(__import__("sqlalchemy").text(f"select status from {header} where id=:id and tenant_id=:tenant"), {"id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
         if not header_row or header_row["status"] != "draft":
             raise HTTPException(status_code=409, detail="Documento inexistente o no editable")
@@ -201,12 +201,12 @@ def _line_endpoint(prefix: str, header: str, detail: str, key: str, value_column
             raise HTTPException(status_code=409, detail="Producto inválido o ya incluido") from exc
         return {"document_id": document_id, "line_total": total}
 
-_line_endpoint("/quotes", "sales_quotes", "sales_quote_items", "quote_id", "unit_price", "sales:write")
-_line_endpoint("/sales-orders", "sales_orders", "sales_order_items", "order_id", "unit_price", "sales:write")
+_line_endpoint("/quotes", "sales_quotes", "sales_quote_items", "quote_id", "unit_price", "sales:write", "quotes")
+_line_endpoint("/sales-orders", "sales_orders", "sales_order_items", "order_id", "unit_price", "sales:write", "sales_orders")
 _line_endpoint("/purchase-orders", "purchase_orders", "purchase_order_items", "purchase_order_id", "unit_cost", "purchases:write")
 
 @router.post("/quotes/{quote_id}/to-sales-order", status_code=status.HTTP_201_CREATED)
-def quote_to_order(quote_id: UUID, number: str, warehouse_id: UUID, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def quote_to_order(quote_id: UUID, number: str, warehouse_id: UUID, actor: Actor = Depends(require_permission("sales:write", "quotes")), db: Session = Depends(get_db)):
     quote = db.execute(__import__("sqlalchemy").text("select * from sales_quotes where id=:id and tenant_id=:tenant and status='approved' and sales_order_id is null for update"), {"id":str(quote_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not quote:
         raise HTTPException(status_code=409, detail="Cotización no aprobada o ya convertida")
@@ -227,7 +227,7 @@ def quote_to_order(quote_id: UUID, number: str, warehouse_id: UUID, actor: Actor
         raise HTTPException(status_code=409, detail="No se pudo convertir la cotización") from exc
 
 @router.post("/sales-orders/{order_id}/to-sale", status_code=status.HTTP_201_CREATED)
-def order_to_sale(order_id: UUID, number: str, request: Request, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def order_to_sale(order_id: UUID, number: str, request: Request, actor: Actor = Depends(require_permission("sales:write", "sales_orders")), db: Session = Depends(get_db)):
     order = db.execute(__import__("sqlalchemy").text("select * from sales_orders where id=:id and tenant_id=:tenant and status in ('confirmed','fulfilled') for update"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().first()
     if not order:
         raise HTTPException(status_code=409, detail="Pedido no confirmado o inexistente")
