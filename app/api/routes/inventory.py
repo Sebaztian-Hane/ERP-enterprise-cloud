@@ -138,6 +138,65 @@ def inventory_valuation(actor: Actor = Depends(require_permission("inventory:rea
     return {"valuation": items, "total_value": sum((item["inventory_value"] for item in items), Decimal("0.00"))}
 
 
+@router.get("/reconciliation")
+def inventory_reconciliation(
+    product_id: UUID | None = None,
+    warehouse_id: UUID | None = None,
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+):
+    """Compare the materialized stock balance against the immutable kardex.
+
+    This is deliberately diagnostic.  A historical import can legitimately
+    start with an opening balance, so silently overwriting ``inventories`` from
+    movements would turn an audit warning into lost stock.  Differences must be
+    regularised through the already approved physical-count workflow.
+    """
+    filters = ["i.tenant_id = :tenant"]
+    values: dict[str, str] = {"tenant": str(actor.tenant_id)}
+    if product_id:
+        filters.append("i.product_id = :product")
+        values["product"] = str(product_id)
+    if warehouse_id:
+        filters.append("i.warehouse_id = :warehouse")
+        values["warehouse"] = str(warehouse_id)
+    rows = db.execute(text(f"""
+        select
+          i.product_id, p.sku, p.name as product_name,
+          i.warehouse_id, w.code as warehouse_code, w.name as warehouse_name,
+          i.quantity as on_hand_quantity,
+          coalesce(sum(m.quantity), 0) as kardex_quantity,
+          i.quantity - coalesce(sum(m.quantity), 0) as difference_quantity,
+          count(m.id)::integer as movement_count,
+          max(m.created_at) as last_movement_at
+        from inventories i
+        join products p on p.id=i.product_id and p.tenant_id=i.tenant_id
+        join warehouses w on w.id=i.warehouse_id and w.tenant_id=i.tenant_id
+        left join inventory_movements m on m.tenant_id=i.tenant_id
+          and m.product_id=i.product_id and m.warehouse_id=i.warehouse_id
+        where {' and '.join(filters)}
+        group by i.product_id, p.sku, p.name, i.warehouse_id, w.code, w.name, i.quantity
+        order by p.name, w.name
+    """), values).mappings().all()
+    items = []
+    for row in rows:
+        difference = Decimal(str(row["difference_quantity"]))
+        movements = int(row["movement_count"])
+        # A balance without movement history is an opening balance/import, not
+        # necessarily an error. It remains visible for a controlled count.
+        state = "matched" if difference == 0 else ("opening_balance" if movements == 0 else "requires_physical_count")
+        items.append({**dict(row), "status": state})
+    return {
+        "reconciliation": items,
+        "summary": {
+            "total": len(items),
+            "matched": sum(item["status"] == "matched" for item in items),
+            "opening_balances": sum(item["status"] == "opening_balance" for item in items),
+            "requires_physical_count": sum(item["status"] == "requires_physical_count" for item in items),
+        },
+    }
+
+
 @router.get("/lots")
 def list_lots(
     product_id: UUID | None = None,
