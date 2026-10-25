@@ -25,7 +25,7 @@
 ### Ventas
 
 - [ ] Integrar nota de crédito CPE vinculada a un comprobante aceptado por APISUNAT. Mantener el bloqueo actual de devoluciones con CPE activo hasta completarlo.
-- [ ] Formalizar máquina de estados y transiciones autorizadas para cotización, pedido, entrega, comprobante, cobro y devolución.
+- [x] Formalizar transiciones autorizadas para cotizaciones, pedidos y órdenes de compra; las transiciones fiscales y de cobro siguen en su flujo específico.
 - [x] Recuperar borradores de formularios de venta y compra ante recarga, navegación o fallo de red, aislados por usuario, tenant y tipo de operación.
 - [ ] Consolidar precios por cliente, moneda, lista de precios, descuento y aprobación excepcional.
 

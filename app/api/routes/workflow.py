@@ -151,13 +151,32 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
             return row
         if table == "purchase_orders" and data.status == "approved":
             raise HTTPException(status_code=403, detail="La orden debe aprobarse desde el flujo de aprobaciones")
-        if table == "purchase_orders" and data.status != "cancelled":
-            raise HTTPException(status_code=422, detail="Transición de orden de compra no permitida")
-        if data.status not in allowed:
-            raise HTTPException(status_code=422, detail="Estado no permitido")
-        row = db.execute(__import__("sqlalchemy").text(f"update {table} set status = :status where id = :id and tenant_id = :tenant returning *"), {"status": data.status, "id": str(document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+        # Every remaining document transition is explicit.  Previously the
+        # generic fallback accepted any declared state from any source state;
+        # an already cancelled quotation could therefore be resurrected.
+        transitions = {
+            "sales_quotes": {
+                "approved": {"draft"},
+                "cancelled": {"draft", "approved"},
+            },
+            "purchase_orders": {
+                "cancelled": {"draft", "submitted", "approved"},
+            },
+        }
+        accepted_from = transitions.get(table, {}).get(data.status)
+        if not accepted_from:
+            raise HTTPException(status_code=422, detail="Transición de documento no permitida")
+        row = db.execute(__import__("sqlalchemy").text(f"""
+            update {table} set status=:status, updated_at=now()
+            where id=:id and tenant_id=:tenant and status = any(cast(:accepted_from as varchar[]))
+            returning *
+        """), {"status": data.status, "id": str(document_id), "tenant": str(actor.tenant_id), "accepted_from": list(accepted_from)}).mappings().first()
         if not row:
-            raise HTTPException(status_code=404, detail="Documento no encontrado")
+            exists = db.execute(__import__("sqlalchemy").text(f"select 1 from {table} where id=:id and tenant_id=:tenant"), {"id": str(document_id), "tenant": str(actor.tenant_id)}).first()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Documento no encontrado")
+            raise HTTPException(status_code=409, detail="El documento no se encuentra en un estado que admita esta transición")
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action=f"transition_to_{data.status}", module=module_code or "workflow", entity=table.rstrip("s"), entity_id=document_id, detail=row["number"])
         db.commit()
         return row
 
