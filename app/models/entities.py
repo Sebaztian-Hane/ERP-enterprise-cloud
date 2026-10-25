@@ -490,6 +490,9 @@ class Document(TimestampedTenantModel):
     storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size_bytes: Mapped[int] = mapped_column(nullable=False)
+    # SHA-256 of the original upload. It permits an approval attachment to be
+    # independently checked without trusting the mutable storage filename.
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     entity_type: Mapped[str | None] = mapped_column(String(40))
     entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     uploaded_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)

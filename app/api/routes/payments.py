@@ -88,7 +88,8 @@ def create_payment(request: Request, response: Response, data: PaymentCreate, ac
                 db.add(PaymentAllocation(tenant_id=actor.tenant_id, payment_id=payment.id, payable_id=account.id, amount=allocation.amount))
             policy_id = db.execute(__import__("sqlalchemy").text("""
                 select id from approval_policies where tenant_id=:tenant and module='payments'
-                and action='supplier_payment' and is_active=true and min_amount<=:amount
+                  and action='supplier_payment' and is_active=true and min_amount<=:amount
+                  and warehouse_id is null and cost_center_id is null and area_code is null and risk_level is null
                 order by min_amount desc limit 1
             """), {"tenant": str(actor.tenant_id), "amount": data.amount}).scalar()
             request_id = db.execute(__import__("sqlalchemy").text("""

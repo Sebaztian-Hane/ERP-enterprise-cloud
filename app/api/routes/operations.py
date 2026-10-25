@@ -82,6 +82,47 @@ class PolicyIn(BaseModel):
     # requester, approver and executor are distinct duties.
     require_executor_separation: bool = True
     is_active: bool = True
+    warehouse_id: UUID | None = None
+    cost_center_id: UUID | None = None
+    area_code: str | None = Field(default=None, min_length=2, max_length=40)
+    risk_level: str | None = None
+
+    @field_validator("risk_level")
+    @classmethod
+    def valid_risk_level(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"low", "medium", "high", "critical"}:
+            raise ValueError("Nivel de riesgo no válido")
+        return value
+
+
+class DelegationIn(BaseModel):
+    delegator_user_id: UUID
+    delegate_user_id: UUID
+    starts_at: datetime
+    ends_at: datetime
+    module: str | None = Field(default=None, min_length=2, max_length=40)
+    action: str | None = Field(default=None, min_length=2, max_length=40)
+    reason: str = Field(min_length=5, max_length=500)
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def delegation_requires_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("Las fechas de delegación deben incluir zona horaria")
+        return value
+
+    @field_validator("ends_at")
+    @classmethod
+    def delegation_has_valid_dates(cls, value: datetime, info) -> datetime:
+        if info.data.get("starts_at") and value <= info.data["starts_at"]:
+            raise ValueError("La delegación debe terminar después de iniciar")
+        if value > datetime.now(timezone.utc) + timedelta(days=90):
+            raise ValueError("La delegación no puede exceder 90 días")
+        return value
+
+
+class ApprovalAttachmentIn(BaseModel):
+    document_id: UUID
 
 
 class MasterIn(BaseModel):
@@ -441,8 +482,20 @@ def approval_policies(actor: Actor = Depends(require_permission("approvals:read"
 
 @router.post("/approvals/policies", status_code=status.HTTP_201_CREATED)
 def create_policy(data: PolicyIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
-    row = db.execute(text("""insert into approval_policies(tenant_id,module,action,min_amount,required_role,require_executor_separation,is_active)
-       values(:tenant,:module,:action,:amount,:role,:separate_executor,:active) returning *"""), {"tenant": str(actor.tenant_id), "module": data.module, "action": data.action, "amount": data.min_amount, "role": data.required_role, "separate_executor": data.require_executor_separation, "active": data.is_active}).mappings().one()
+    if data.warehouse_id and not db.execute(text("select 1 from warehouses where id=:id and tenant_id=:tenant"), {"id": str(data.warehouse_id), "tenant": str(actor.tenant_id)}).first():
+        raise HTTPException(status_code=422, detail="El almacén no pertenece a la empresa")
+    if data.cost_center_id and not db.execute(text("select 1 from cost_centers where id=:id and tenant_id=:tenant"), {"id": str(data.cost_center_id), "tenant": str(actor.tenant_id)}).first():
+        raise HTTPException(status_code=422, detail="El centro de costo no pertenece a la empresa")
+    role_exists = db.execute(text("select 1 from roles where code=:role"), {"role": data.required_role}).first()
+    if not role_exists:
+        raise HTTPException(status_code=422, detail="El rol requerido no existe")
+    row = db.execute(text("""insert into approval_policies(
+         tenant_id,module,action,min_amount,required_role,require_executor_separation,is_active,
+         warehouse_id,cost_center_id,area_code,risk_level
+       ) values(
+         :tenant,:module,:action,:amount,:role,:separate_executor,:active,
+         :warehouse,:cost_center,:area,:risk
+       ) returning *"""), {"tenant": str(actor.tenant_id), "module": data.module, "action": data.action, "amount": data.min_amount, "role": data.required_role, "separate_executor": data.require_executor_separation, "active": data.is_active, "warehouse": str(data.warehouse_id) if data.warehouse_id else None, "cost_center": str(data.cost_center_id) if data.cost_center_id else None, "area": data.area_code, "risk": data.risk_level}).mappings().one()
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_policy", module="approvals", entity="approval_policy", entity_id=row["id"])
     db.commit(); return row
 
@@ -450,6 +503,93 @@ def create_policy(data: PolicyIn, actor: Actor = Depends(require_permission("app
 @router.get("/approvals")
 def list_approvals(actor: Actor = Depends(require_permission("approvals:read")), db: Session = Depends(get_db)):
     return db.execute(text("select * from approval_requests where tenant_id=:tenant order by created_at desc"), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.get("/approvals/delegations")
+def list_delegations(actor: Actor = Depends(require_permission("approvals:read")), db: Session = Depends(get_db)):
+    return db.execute(text("""
+        select d.*, delegator.role_code as delegator_role, delegate.role_code as delegate_role
+        from approval_delegations d
+        join tenant_memberships delegator on delegator.tenant_id=d.tenant_id and delegator.user_id=d.delegator_user_id
+        join tenant_memberships delegate on delegate.tenant_id=d.tenant_id and delegate.user_id=d.delegate_user_id
+        where d.tenant_id=:tenant order by d.created_at desc
+    """), {"tenant": str(actor.tenant_id)}).mappings().all()
+
+
+@router.post("/approvals/delegations", status_code=status.HTTP_201_CREATED)
+def create_delegation(data: DelegationIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    if data.starts_at.tzinfo is None or data.ends_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="Las fechas de delegación deben incluir zona horaria")
+    memberships = db.execute(text("""
+        select user_id, role_code, is_active from tenant_memberships
+        where tenant_id=:tenant and user_id in (:delegator, :delegate)
+    """), {"tenant": str(actor.tenant_id), "delegator": str(data.delegator_user_id), "delegate": str(data.delegate_user_id)}).mappings().all()
+    members = {str(row["user_id"]): row for row in memberships}
+    if data.delegator_user_id == data.delegate_user_id:
+        raise HTTPException(status_code=422, detail="No puede delegar una aprobación en la misma persona")
+    if len(members) != 2 or not all(row["is_active"] for row in members.values()):
+        raise HTTPException(status_code=422, detail="Ambas personas deben pertenecer activamente a la empresa")
+    if data.delegator_user_id != actor.user_id and actor.role_code != "owner":
+        raise HTTPException(status_code=403, detail="Solo el propietario puede crear delegaciones para otro aprobador")
+    row = db.execute(text("""
+        insert into approval_delegations(
+          tenant_id,delegator_user_id,delegate_user_id,module,action,starts_at,ends_at,reason,created_by
+        ) values(:tenant,:delegator,:delegate,:module,:action,:starts,:ends,:reason,:actor)
+        returning *
+    """), {"tenant": str(actor.tenant_id), "delegator": str(data.delegator_user_id), "delegate": str(data.delegate_user_id), "module": data.module, "action": data.action, "starts": data.starts_at, "ends": data.ends_at, "reason": data.reason, "actor": str(actor.user_id)}).mappings().one()
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_delegation", module="approvals", entity="approval_delegation", entity_id=row["id"], detail=data.reason)
+    db.commit()
+    return row
+
+
+@router.delete("/approvals/delegations/{delegation_id}")
+def revoke_delegation(delegation_id: UUID, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    row = db.execute(text("""
+        update approval_delegations set status='revoked', revoked_at=now(), revoked_by=:actor
+        where id=:id and tenant_id=:tenant and status='active'
+          and (delegator_user_id=:actor or :role='owner')
+        returning *
+    """), {"id": str(delegation_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "role": actor.role_code}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Delegación activa no encontrada o no tiene permiso para revocarla")
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="revoke_delegation", module="approvals", entity="approval_delegation", entity_id=delegation_id)
+    db.commit()
+    return row
+
+
+@router.post("/approvals/documents/{approval_document_id}/attachments", status_code=status.HTTP_201_CREATED)
+def attach_approval_document(approval_document_id: UUID, data: ApprovalAttachmentIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    """Link an already private, hashed upload to a pending approval record.
+
+    The file itself remains immutable in object storage by path; this link keeps
+    the original metadata and SHA-256 as signed-workflow evidence.
+    """
+    approval_document = db.execute(text("""
+        select id from approval_documents
+        where id=:id and tenant_id=:tenant and status='submitted'
+    """), {"id": str(approval_document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not approval_document:
+        raise HTTPException(status_code=409, detail="La constancia no existe o ya fue decidida")
+    upload = db.execute(text("""
+        select id, original_filename, content_type, size_bytes, content_hash
+        from documents where id=:id and tenant_id=:tenant
+    """), {"id": str(data.document_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="El archivo no pertenece a la empresa")
+    if not upload["content_hash"]:
+        raise HTTPException(status_code=422, detail="El archivo fue cargado antes del control de huella; vuelva a cargarlo para adjuntarlo como evidencia")
+    row = db.execute(text("""
+        insert into approval_document_attachments(
+          tenant_id,approval_document_id,document_id,original_filename,content_type,size_bytes,content_hash,attached_by
+        ) values(:tenant,:approval_document,:document,:filename,:content_type,:size,:hash,:actor)
+        on conflict (approval_document_id,document_id) do nothing
+        returning *
+    """), {"tenant": str(actor.tenant_id), "approval_document": str(approval_document_id), "document": str(data.document_id), "filename": upload["original_filename"], "content_type": upload["content_type"], "size": upload["size_bytes"], "hash": upload["content_hash"], "actor": str(actor.user_id)}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=409, detail="El archivo ya está adjunto a esta constancia")
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="attach_evidence", module="approvals", entity="approval_document", entity_id=approval_document_id, detail=upload["original_filename"])
+    db.commit()
+    return row
 
 
 @router.post("/approvals/signing-keys", status_code=status.HTTP_201_CREATED)
@@ -471,20 +611,56 @@ def register_signing_key(data: SigningKeyIn, actor: Actor = Depends(require_perm
     return row
 
 
+def _delegated_from_for_request(request_id: UUID, actor: Actor, db: Session) -> UUID | None:
+    """Authorize an approver or an active, scoped substitute.
+
+    The decision remains signed by the delegate's browser key.  Returning the
+    delegator preserves a verifiable audit chain without making a delegate an
+    implicit permanent approver.
+    """
+    request = db.execute(text("""
+        select r.id, r.status, r.requested_by, r.module, r.action, p.required_role
+        from approval_requests r
+        left join approval_policies p on p.id=r.policy_id and p.tenant_id=r.tenant_id
+        where r.id=:id and r.tenant_id=:tenant for update
+    """), {"id": str(request_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not request or request["status"] != "pending" or request["requested_by"] == actor.user_id:
+        raise HTTPException(status_code=409, detail="No puede decidir esta solicitud o ya fue resuelta")
+    required_role = request["required_role"]
+    if (required_role is None and actor.role_code in {"owner", "admin"}) or actor.role_code in {"owner", "admin"} or actor.role_code == required_role:
+        return None
+    delegation = db.execute(text("""
+        select d.delegator_user_id
+        from approval_delegations d
+        join tenant_memberships grantor
+          on grantor.tenant_id=d.tenant_id and grantor.user_id=d.delegator_user_id and grantor.is_active=true
+        where d.tenant_id=:tenant and d.delegate_user_id=:actor and d.status='active'
+          and d.starts_at <= now() and d.ends_at > now()
+          and (d.module is null or d.module=:module)
+          and (d.action is null or d.action=:action)
+          and (
+            (:required_role is null and grantor.role_code in ('owner','admin'))
+            or grantor.role_code in ('owner','admin') or grantor.role_code=:required_role
+          )
+        order by d.created_at desc limit 1
+    """), {"tenant": str(actor.tenant_id), "actor": str(actor.user_id), "module": request["module"], "action": request["action"], "required_role": required_role}).mappings().first()
+    if not delegation:
+        raise HTTPException(status_code=403, detail="No tiene atribución para aprobar esta solicitud")
+    return delegation["delegator_user_id"]
+
+
 @router.post("/approvals/{request_id}/signature-challenge")
 def create_signature_challenge(request_id: UUID, decision: str, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if decision not in {"approved", "rejected"}:
         raise HTTPException(status_code=422, detail="Decisión de firma no válida")
+    _delegated_from_for_request(request_id, actor, db)
     row = db.execute(text("""
         select r.id as request_id, d.id as document_id, d.content_hash
         from approval_requests r
         join approval_documents d on d.approval_request_id=r.id and d.tenant_id=r.tenant_id
-        where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
-          and ((r.policy_id is null and :role in ('owner','admin'))
-            or exists(select 1 from approval_policies p where p.id=r.policy_id
-              and (p.required_role=:role or :role in ('owner','admin'))))
+        where r.id=:id and r.tenant_id=:tenant and r.status='pending'
         order by d.created_at desc limit 1
-    """), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "role": actor.role_code}).mappings().first()
+    """), {"id": str(request_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede firmar esta solicitud o no tiene una constancia disponible")
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
@@ -521,22 +697,19 @@ def _verify_decision_signature(request_id: UUID, data: DecisionIn, decision: str
         set used_at=now()
         where id=:id and tenant_id=:tenant and used_at is null
     """), {"id": str(challenge["id"]), "tenant": str(actor.tenant_id)})
-    return {"signed_hash": message_hash(message), "signing_key_id": data.signing_key_id, "signature_value": data.signature}
+    return {"signed_hash": message_hash(message), "signing_key_id": data.signing_key_id, "signature_value": data.signature, "signature_challenge_id": challenge["id"]}
 
 
 @router.post("/approvals/{request_id}/approve")
 def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    delegated_from_user_id = _delegated_from_for_request(request_id, actor, db)
     signature = _verify_decision_signature(request_id, data, "approved", actor, db)
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
-      and (
-        (r.policy_id is null and :role in ('owner','admin'))
-        or exists(select 1 from approval_policies p where p.id=r.policy_id
-          and (p.required_role=:role or :role in ('owner','admin')))
-      ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
+      returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="approved", **signature)
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="approved", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='approved' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     elif row["entity_type"] == "inventory_count":
@@ -561,22 +734,19 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
     elif row["entity_type"] == "inventory_adjustment":
         db.execute(text("""update inventory_adjustment_requests set status='approved',approved_by=:actor,updated_at=now()
             where id=:id and tenant_id=:tenant and status='submitted'"""), {"id":str(row["entity_id"]),"tenant":str(actor.tenant_id),"actor":str(actor.user_id)})
-    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="approve_delegated" if delegated_from_user_id else "approve", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
 
 @router.post("/approvals/{request_id}/reject")
 def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    delegated_from_user_id = _delegated_from_for_request(request_id, actor, db)
     signature = _verify_decision_signature(request_id, data, "rejected", actor, db)
     row = db.execute(text("""update approval_requests r set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
-      and (
-        (r.policy_id is null and :role in ('owner','admin'))
-        or exists(select 1 from approval_policies p where p.id=r.policy_id
-          and (p.required_role=:role or :role in ('owner','admin')))
-      ) returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note, "role": actor.role_code}).mappings().first()
+      returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
     if not row: raise HTTPException(status_code=409, detail="La solicitud no existe o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, decision="rejected", **signature)
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="rejected", **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='cancelled' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     elif row["entity_type"] == "inventory_count":
@@ -600,7 +770,7 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
     elif row["entity_type"] == "inventory_adjustment":
         db.execute(text("""update inventory_adjustment_requests set status='rejected',updated_at=now()
             where id=:id and tenant_id=:tenant and status='submitted'"""), {"id":str(row["entity_id"]),"tenant":str(actor.tenant_id)})
-    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reject_delegated" if delegated_from_user_id else "reject", module="approvals", entity="approval_request", entity_id=request_id, detail=data.decision_note)
     db.commit(); return row
 
 

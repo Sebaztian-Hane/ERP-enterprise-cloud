@@ -1,4 +1,5 @@
 from pathlib import PurePath
+from hashlib import sha256
 from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import select, text
@@ -11,6 +12,8 @@ from app.schemas.documents import DocumentOut, SignedUrlOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
+from app.services.approval_documents import payload_hash
+from app.services.internal_signatures import message_hash, signing_message, verify_p256_signature
 from app.storage.supabase import signed_url, upload
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -43,7 +46,7 @@ async def upload_document(request: Request, response: Response, file: UploadFile
     document_id = uuid4()
     path = f"tenant/{actor.tenant_id}/{document_id}/{filename}"
     await upload(path, file, content)
-    document = Document(id=document_id, tenant_id=actor.tenant_id, original_filename=filename, storage_path=path, content_type=file.content_type, size_bytes=len(content), entity_type=entity_type, entity_id=entity_id, uploaded_by=actor.user_id)
+    document = Document(id=document_id, tenant_id=actor.tenant_id, original_filename=filename, storage_path=path, content_type=file.content_type, size_bytes=len(content), content_hash=sha256(content).hexdigest(), entity_type=entity_type, entity_id=entity_id, uploaded_by=actor.user_id)
     db.add(document)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="upload", module="documents", entity="document", entity_id=document.id)
     db.commit()
@@ -111,3 +114,59 @@ def approval_record(record_id: UUID, actor: Actor = Depends(require_permission("
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="view_evidence", module="documents", entity="approval_document", entity_id=record_id)
     db.commit()
     return record_row
+
+
+@router.get("/approval-records/{record_id}/verify")
+def verify_approval_record(record_id: UUID, actor: Actor = Depends(require_permission("documents:read")), db: Session = Depends(get_db)):
+    """Verify the immutable payload and every internal browser signature.
+
+    This intentionally verifies the internal evidence only. A qualified
+    certificate validation chain will be added when its legal provider is
+    selected, and is never implied by this endpoint.
+    """
+    document = db.execute(text("""
+        select id, document_number, status, canonical_payload, content_hash
+        from approval_documents where id=:id and tenant_id=:tenant
+    """), {"id": str(record_id), "tenant": str(actor.tenant_id)}).mappings().first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Constancia documental no encontrada")
+    signatures = db.execute(text("""
+        select s.id, s.signature_type, s.decision, s.signed_hash, s.signer_user_id,
+               s.signing_key_id, s.signature_value, s.signature_algorithm,
+               s.delegated_from_user_id, s.signed_at, c.id as challenge_id, k.public_jwk
+        from approval_signatures s
+        left join approval_signature_challenges c on c.id=s.signature_challenge_id
+        left join user_signing_keys k on k.id=s.signing_key_id and k.tenant_id=s.tenant_id
+        where s.approval_document_id=:id and s.tenant_id=:tenant
+        order by s.created_at
+    """), {"id": str(record_id), "tenant": str(actor.tenant_id)}).mappings().all()
+    verified_signatures = []
+    for signature in signatures:
+        verified = False
+        reason = None
+        if signature["signature_type"] != "internal_approval":
+            reason = "La validación del certificado cualificado requiere el proveedor legal configurado."
+        elif not all((signature["challenge_id"], signature["public_jwk"], signature["signature_value"], signature["signing_key_id"])):
+            reason = "Falta material criptográfico de la firma interna."
+        else:
+            message = signing_message(challenge_id=signature["challenge_id"], document_id=document["id"], document_hash=document["content_hash"], decision=signature["decision"], signer_user_id=signature["signer_user_id"])
+            try:
+                if signature["signed_hash"] != message_hash(message):
+                    raise ValueError("La huella firmada no coincide con el reto")
+                verify_p256_signature(public_jwk=signature["public_jwk"], message=message, signature_b64=signature["signature_value"])
+                verified = True
+            except ValueError as exc:
+                reason = str(exc)
+        verified_signatures.append({
+            "id": signature["id"], "type": signature["signature_type"], "decision": signature["decision"],
+            "signed_at": signature["signed_at"], "signer_user_id": signature["signer_user_id"],
+            "delegated_from_user_id": signature["delegated_from_user_id"], "verified": verified, "reason": reason,
+        })
+    attachments = db.execute(text("""
+        select id, document_id, original_filename, content_type, size_bytes, content_hash, created_at
+        from approval_document_attachments where approval_document_id=:id and tenant_id=:tenant order by created_at
+    """), {"id": str(record_id), "tenant": str(actor.tenant_id)}).mappings().all()
+    is_intact = payload_hash(document["canonical_payload"]) == document["content_hash"]
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="verify_evidence", module="documents", entity="approval_document", entity_id=record_id)
+    db.commit()
+    return {"document_id": document["id"], "document_number": document["document_number"], "status": document["status"], "content_hash": document["content_hash"], "payload_intact": is_intact, "signatures": verified_signatures, "attachments": attachments}

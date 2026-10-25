@@ -325,7 +325,11 @@ def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends
         raise HTTPException(status_code=404, detail="Producto o almacén no encontrado en la empresa activa")
     row = db.execute(text("""insert into inventory_adjustment_requests(tenant_id,product_id,warehouse_id,quantity,reference,reason,note,requested_by)
       values(:tenant,:product,:warehouse,:quantity,:reference,:reason,:note,:actor) returning *"""), {"tenant":str(actor.tenant_id),"product":str(data.product_id),"warehouse":str(data.warehouse_id),"quantity":data.quantity,"reference":data.reference,"reason":data.reason,"note":data.note,"actor":str(actor.user_id)}).mappings().one()
-    policy = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='inventory' and action='stock_adjustment' and is_active=true order by min_amount limit 1"""), {"tenant":str(actor.tenant_id)}).scalar()
+    policy = db.execute(text("""select id from approval_policies
+      where tenant_id=:tenant and module='inventory' and action='stock_adjustment' and is_active=true
+        and (warehouse_id is null or warehouse_id=:warehouse)
+        and cost_center_id is null and area_code is null and risk_level is null
+      order by (warehouse_id is not null) desc, min_amount desc limit 1"""), {"tenant":str(actor.tenant_id),"warehouse":str(data.warehouse_id)}).scalar()
     approval_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
       values(:tenant,:policy,'inventory','stock_adjustment','inventory_adjustment',:id,'{}'::jsonb,:actor) returning id"""), {"tenant":str(actor.tenant_id),"policy":str(policy) if policy else None,"id":str(row["id"]),"actor":str(actor.user_id)}).scalar_one()
     db.execute(text("update inventory_adjustment_requests set approval_request_id=:approval where id=:id"),{"approval":str(approval_id),"id":str(row["id"])})

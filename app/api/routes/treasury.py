@@ -42,7 +42,9 @@ def _fund(db: Session, tenant_id: UUID, fund_id: UUID, lock: bool = False) -> di
     return row
 
 def _approval(db: Session, tenant_id: UUID, action: str, entity_type: str, entity_id: UUID, amount: Decimal, actor_id: UUID) -> UUID:
-    policy_id = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='treasury' and action=:action and is_active=true and min_amount<=:amount order by min_amount desc limit 1"""), {"tenant": str(tenant_id), "action": action, "amount": amount}).scalar()
+    policy_id = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='treasury' and action=:action and is_active=true and min_amount<=:amount
+      and warehouse_id is null and cost_center_id is null and area_code is null and risk_level is null
+      order by min_amount desc limit 1"""), {"tenant": str(tenant_id), "action": action, "amount": amount}).scalar()
     return db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,amount,payload,requested_by) values(:tenant,:policy,'treasury',:action,:entity_type,:entity_id,:amount,'{}'::jsonb,:actor) returning id"""), {"tenant": str(tenant_id), "policy": str(policy_id) if policy_id else None, "action": action, "entity_type": entity_type, "entity_id": str(entity_id), "amount": amount, "actor": str(actor_id)}).scalar_one()
 
 @router.get("/accounts")

@@ -131,8 +131,10 @@ def _register(prefix: str, table: str, counterparty: str, counterparty_model, wr
                 select id from approval_policies
                 where tenant_id=:tenant and module='purchases' and action='purchase_order'
                   and is_active=true and min_amount <= :amount
-                order by min_amount desc limit 1
-            """), {"tenant": str(actor.tenant_id), "amount": order["total"]}).scalar()
+                  and (warehouse_id is null or warehouse_id=:warehouse)
+                  and cost_center_id is null and area_code is null and risk_level is null
+                order by (warehouse_id is not null) desc, min_amount desc limit 1
+            """), {"tenant": str(actor.tenant_id), "amount": order["total"], "warehouse": str(order["warehouse_id"])}).scalar()
             request_id = db.execute(__import__("sqlalchemy").text("""
                 insert into approval_requests(tenant_id, policy_id, module, action, entity_type, entity_id, amount, payload, requested_by)
                 values(:tenant, :policy, 'purchases', 'purchase_order', 'purchase_order', :order, :amount,
