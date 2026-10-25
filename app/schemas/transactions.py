@@ -144,6 +144,7 @@ class PurchaseLineCreate(BaseModel):
 
 class PurchaseCreate(BaseModel):
     number: str | None = Field(default=None, min_length=1, max_length=40)
+    purchase_order_id: UUID | None = None
     supplier_id: UUID
     warehouse_id: UUID
     lines: list[PurchaseLineCreate] = Field(min_length=1)
@@ -197,3 +198,22 @@ class PurchaseOut(ORMModel):
 
 class CancelTransaction(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
+
+
+class CommercialReturnCreate(BaseModel):
+    """Full reversal of a posted commercial document.
+
+    Partial fiscal credit notes need a dedicated CPE adapter and are therefore
+    deliberately not represented by this command.
+    """
+
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class CommercialReturnOut(ORMModel):
+    id: UUID
+    number: str
+    status: str
+    reason: str
+    sale_id: UUID | None = None
+    purchase_id: UUID | None = None

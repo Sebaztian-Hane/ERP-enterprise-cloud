@@ -103,6 +103,7 @@ class InventoryTransferCreate(BaseModel):
     source_warehouse_id: UUID
     destination_warehouse_id: UUID
     quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
+    serial_numbers: list[str] | None = Field(default=None, max_length=100)
     note: str | None = None
 
     @model_validator(mode="after")
@@ -118,6 +119,22 @@ class InventoryTransferCreate(BaseModel):
             raise ValueError("La cantidad debe ser un número entero")
         return value
 
+    @field_validator("serial_numbers")
+    @classmethod
+    def serials_must_be_unique(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return values
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("Las series de una transferencia deben ser únicas")
+        return normalized
+
+    @model_validator(mode="after")
+    def serial_count_matches_quantity(self):
+        if self.serial_numbers is not None and len(self.serial_numbers) != int(self.quantity):
+            raise ValueError("La cantidad de series debe coincidir con la cantidad transferida")
+        return self
+
 
 class InventoryTransferOut(ORMModel):
     id: UUID
@@ -127,4 +144,5 @@ class InventoryTransferOut(ORMModel):
     destination_warehouse_id: UUID
     quantity: Decimal
     status: str
+    serial_numbers: list[str] | None
     note: str | None

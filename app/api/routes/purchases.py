@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import AccountPayable, Product, Purchase, PurchaseItem, Supplier, Warehouse
-from app.schemas.transactions import CancelTransaction, PurchaseCreate, PurchaseOut
+from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PurchaseCreate, PurchaseOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
@@ -85,6 +85,30 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
     if not supplier or products != product_ids:
         raise HTTPException(status_code=404, detail="Proveedor, almacén o producto no pertenece a la empresa activa")
+    # A receipt linked to an order must pass the three-way match on the
+    # server. Browser values are never authoritative for received quantity or
+    # unit cost.
+    if data.purchase_order_id:
+        order = db.execute(text("""
+            select id, supplier_id, warehouse_id, status from purchase_orders
+            where id=:id and tenant_id=:tenant for update
+        """), {"id": str(data.purchase_order_id), "tenant": str(actor.tenant_id)}).mappings().first()
+        if not order or order["status"] != "approved":
+            raise HTTPException(status_code=409, detail="La orden de compra debe estar aprobada antes de recibirse")
+        if order["supplier_id"] != data.supplier_id or order["warehouse_id"] != data.warehouse_id:
+            raise HTTPException(status_code=422, detail="Proveedor o almacén no coinciden con la orden de compra")
+        if db.execute(text("select 1 from purchases where tenant_id=:tenant and purchase_order_id=:order"), {"tenant": str(actor.tenant_id), "order": str(data.purchase_order_id)}).first():
+            raise HTTPException(status_code=409, detail="La orden de compra ya fue recibida")
+        expected = {
+            row["product_id"]: (Decimal(str(row["quantity"])), Decimal(str(row["unit_cost"])))
+            for row in db.execute(text("""
+                select product_id, quantity, unit_cost from purchase_order_items
+                where tenant_id=:tenant and purchase_order_id=:order
+            """), {"tenant": str(actor.tenant_id), "order": str(data.purchase_order_id)}).mappings().all()
+        }
+        actual = {line.product_id: (line.quantity, line.unit_cost) for line in data.lines}
+        if actual != expected:
+            raise HTTPException(status_code=422, detail="La recepción debe coincidir exactamente con productos, cantidades y costos de la orden")
     total = sum((line.quantity * line.unit_cost for line in data.lines), Decimal("0"))
     document_date = data.supplier_document_date or datetime.now(timezone.utc).date()
     tax_rate = resolve_default_tax_rate(
@@ -107,6 +131,7 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
     )
     purchase = Purchase(
         tenant_id=actor.tenant_id, number=number, supplier_id=data.supplier_id, warehouse_id=data.warehouse_id,
+        purchase_order_id=data.purchase_order_id,
         legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
         branch_id=operational_context.branch.id if operational_context.branch else None,
         status="received", total=total, note=data.note, supplier_document_type=data.supplier_document_type,
@@ -165,6 +190,46 @@ def receive_purchase(request: Request, data: PurchaseCreate, actor: Actor = Depe
         raise HTTPException(status_code=409, detail="El número de compra ya existe en esta empresa") from exc
     db.refresh(purchase)
     return purchase
+
+
+@router.post("/{purchase_id}/return", response_model=CommercialReturnOut, status_code=status.HTTP_201_CREATED)
+def return_purchase(purchase_id: str, data: CommercialReturnCreate, request: Request, actor: Actor = Depends(require_permission("purchases:write")), db: Session = Depends(get_db)):
+    """Reverse a full supplier receipt only while its stock remains reversible."""
+    claim = claim_idempotency(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation=f"purchases.return.{purchase_id}", key=request.headers.get("Idempotency-Key"),
+        payload={"purchase_id": purchase_id, **data.model_dump(mode="json")})
+    if claim and claim.is_replay:
+        return replay_response(claim)
+    purchase = db.scalar(select(Purchase).where(Purchase.id == purchase_id, Purchase.tenant_id == actor.tenant_id).with_for_update())
+    account = db.scalar(select(AccountPayable).where(AccountPayable.purchase_id == purchase_id, AccountPayable.tenant_id == actor.tenant_id).with_for_update())
+    if not purchase or purchase.status != "received" or not account:
+        raise HTTPException(status_code=409, detail="Solo se pueden devolver compras recibidas vigentes")
+    if account.balance_amount != account.original_amount:
+        raise HTTPException(status_code=409, detail="No se puede devolver una compra con pagos aplicados")
+    if db.execute(text("select 1 from purchase_returns where tenant_id=:tenant and purchase_id=:purchase"), {"tenant": str(actor.tenant_id), "purchase": purchase_id}).first():
+        raise HTTPException(status_code=409, detail="La compra ya tiene una devolución registrada")
+    items = db.scalars(select(PurchaseItem).where(PurchaseItem.purchase_id == purchase.id, PurchaseItem.tenant_id == actor.tenant_id)).all()
+    number = allocate_document_number(db, tenant_id=actor.tenant_id, module="purchases", document_type="purchase_return", legal_entity_id=purchase.legal_entity_id, branch_id=purchase.branch_id)
+    try:
+        for item in items:
+            product = db.scalar(select(Product).where(Product.id == item.product_id, Product.tenant_id == actor.tenant_id).with_for_update())
+            if not product:
+                raise HTTPException(status_code=409, detail="No se encontró un producto de la compra")
+            reverse_tracked_purchase_receipt(db, tenant_id=actor.tenant_id, product=product, warehouse_id=purchase.warehouse_id, quantity=item.quantity, purchase_reference=purchase.number, reversal_reference=number)
+        returned_id = db.execute(text("""
+            insert into purchase_returns(tenant_id,purchase_id,number,reason,status,created_by)
+            values(:tenant,:purchase,:number,:reason,'posted',:actor) returning id
+        """), {"tenant": str(actor.tenant_id), "purchase": purchase_id, "number": number, "reason": data.reason.strip(), "actor": str(actor.user_id)}).scalar_one()
+        purchase.status, account.status = "returned", "cancelled"
+        reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{number}", description=f"Devolución de compra {purchase.number}", original_source_type="purchase", original_source_id=purchase.id, reversal_source_type="purchase_return")
+        result = {"id": returned_id, "purchase_id": purchase.id, "number": number, "reason": data.reason.strip(), "status": "posted"}
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="return", module="purchases", entity="purchase_return", entity_id=returned_id, detail=purchase.number)
+        complete_idempotency(db, claim=claim, response_body=CommercialReturnOut.model_validate(result).model_dump(mode="json"), response_status=status.HTTP_201_CREATED)
+        db.commit()
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
 
 
 @router.post("/{purchase_id}/cancel", response_model=PurchaseOut)

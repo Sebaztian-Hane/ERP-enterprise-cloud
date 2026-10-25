@@ -35,3 +35,11 @@ def test_serial_receipt_rejects_duplicate_serials():
             product_id=uuid4(), warehouse_id=uuid4(), unit_cost="10",
             serial_numbers=["SER-001", "SER-001"],
         )
+
+
+def test_serial_transfer_requires_one_unique_serial_per_unit():
+    with pytest.raises(ValidationError):
+        InventoryTransferCreate(
+            number="TR-001", product_id=uuid4(), source_warehouse_id=uuid4(), destination_warehouse_id=uuid4(),
+            quantity=2, serial_numbers=["SER-001"],
+        )

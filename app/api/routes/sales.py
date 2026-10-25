@@ -9,7 +9,7 @@ from app.db.session import get_db
 from app.core.config import get_settings
 from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, Inventory, LegalEntity, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
-from app.schemas.transactions import CancelTransaction, PriceListQuoteCreate, SaleCreate, SaleOut
+from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 from app.services.audit import record
@@ -562,3 +562,57 @@ def cancel_sale(sale_id: str, data: CancelTransaction, actor: Actor = Depends(re
     db.commit()
     db.refresh(sale)
     return sale
+
+
+@router.post("/{sale_id}/return", response_model=CommercialReturnOut, status_code=status.HTTP_201_CREATED)
+def return_sale(sale_id: str, data: CommercialReturnCreate, request: Request, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+    """Register a full operational return and reverse its evidence.
+
+    A live CPE must be handled with a linked fiscal credit note; this endpoint
+    refuses to make an operational-only return look like a legal reversal.
+    """
+    claim = claim_idempotency(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id,
+        operation=f"sales.return.{sale_id}", key=request.headers.get("Idempotency-Key"),
+        payload={"sale_id": sale_id, **data.model_dump(mode="json")})
+    if claim and claim.is_replay:
+        return replay_response(claim)
+    sale = db.scalar(select(Sale).where(Sale.id == sale_id, Sale.tenant_id == actor.tenant_id).with_for_update())
+    account = db.scalar(select(AccountReceivable).where(AccountReceivable.sale_id == sale_id, AccountReceivable.tenant_id == actor.tenant_id).with_for_update())
+    if not sale or sale.status != "posted" or not account:
+        raise HTTPException(status_code=409, detail="Solo se pueden devolver ventas procesadas vigentes")
+    if account.balance_amount != account.original_amount:
+        raise HTTPException(status_code=409, detail="No se puede devolver una venta con cobros aplicados")
+    electronic_document = db.scalar(select(ElectronicDocument).where(ElectronicDocument.sale_id == sale.id, ElectronicDocument.tenant_id == actor.tenant_id))
+    if electronic_document and electronic_document.status not in {"voided", "rejected", "exception"}:
+        raise HTTPException(status_code=409, detail="La venta tiene un CPE activo: emite una nota de crédito antes de registrar la devolución")
+    if db.execute(text("select 1 from sales_returns where tenant_id=:tenant and sale_id=:sale"), {"tenant": str(actor.tenant_id), "sale": sale_id}).first():
+        raise HTTPException(status_code=409, detail="La venta ya tiene una devolución registrada")
+    sales_order_id = db.execute(text("select sales_order_id from sales where id=:id and tenant_id=:tenant"), {"id": sale_id, "tenant": str(actor.tenant_id)}).scalar_one_or_none()
+    delivered_items = db.execute(text("""
+        select d.number as delivery_number, i.product_id, i.quantity
+        from sales_deliveries d join sales_delivery_items i on i.delivery_id=d.id and i.tenant_id=d.tenant_id
+        where d.tenant_id=:tenant and d.sales_order_id=:order and d.status in ('dispatched','delivered')
+        order by d.created_at, d.id, i.id
+    """), {"tenant": str(actor.tenant_id), "order": str(sales_order_id)}).mappings().all() if sales_order_id else []
+    reversal_lines = delivered_items or [{"delivery_number": sale.number, "product_id": item.product_id, "quantity": item.quantity} for item in db.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()]
+    number = allocate_document_number(db, tenant_id=actor.tenant_id, module="sales", document_type="sale_return", legal_entity_id=sale.legal_entity_id, branch_id=sale.branch_id)
+    try:
+        for item in reversal_lines:
+            product = db.scalar(select(Product).where(Product.id == item["product_id"], Product.tenant_id == actor.tenant_id).with_for_update())
+            if not product:
+                raise HTTPException(status_code=409, detail="No se encontró un producto de la venta")
+            return_tracked_sale_stock(db, tenant_id=actor.tenant_id, product=product, warehouse_id=sale.warehouse_id, quantity=Decimal(str(item["quantity"])), sale_reference=item["delivery_number"], reversal_reference=number)
+        returned_id = db.execute(text("""
+            insert into sales_returns(tenant_id,sale_id,number,reason,status,created_by)
+            values(:tenant,:sale,:number,:reason,'posted',:actor) returning id
+        """), {"tenant": str(actor.tenant_id), "sale": sale_id, "number": number, "reason": data.reason.strip(), "actor": str(actor.user_id)}).scalar_one()
+        sale.status, account.status = "returned", "cancelled"
+        reverse_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"REV-{number}", description=f"Devolución de venta {sale.number}", original_source_type="sale", original_source_id=sale.id, reversal_source_type="sale_return")
+        result = {"id": returned_id, "sale_id": sale.id, "number": number, "reason": data.reason.strip(), "status": "posted"}
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="return", module="sales", entity="sale_return", entity_id=returned_id, detail=sale.number)
+        complete_idempotency(db, claim=claim, response_body=CommercialReturnOut.model_validate(result).model_dump(mode="json"), response_status=status.HTTP_201_CREATED)
+        db.commit()
+        return result
+    except HTTPException:
+        db.rollback()
+        raise

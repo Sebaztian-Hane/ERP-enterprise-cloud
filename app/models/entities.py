@@ -289,6 +289,7 @@ class InventoryTransfer(TimestampedTenantModel):
     destination_warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="completed", nullable=False)
+    serial_numbers: Mapped[list[str] | None] = mapped_column(JSONB)
     note: Mapped[str | None] = mapped_column(Text)
 
 
@@ -343,6 +344,7 @@ class Purchase(TimestampedTenantModel):
     __tablename__ = "purchases"
     __table_args__ = (UniqueConstraint("tenant_id", "number"), Index("ix_purchases_tenant_created", "tenant_id", "created_at"))
     number: Mapped[str] = mapped_column(String(40), nullable=False)
+    purchase_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("purchase_orders.id"), unique=True)
     supplier_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("suppliers.id"), nullable=False)
     warehouse_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("warehouses.id"), nullable=False)
     # See Sale: these are immutable posting-time operational references.

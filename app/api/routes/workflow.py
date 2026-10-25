@@ -301,10 +301,6 @@ def order_to_purchase(order_id: UUID, number: str, actor: Actor = Depends(requir
     rows = db.execute(__import__("sqlalchemy").text("select product_id,quantity,unit_cost from purchase_order_items where purchase_order_id=:id and tenant_id=:tenant"), {"id":str(order_id),"tenant":str(actor.tenant_id)}).mappings().all()
     if not rows:
         raise HTTPException(status_code=422, detail="La orden no tiene líneas")
-    purchase = receive_purchase(PurchaseCreate(number=number, supplier_id=order["supplier_id"], warehouse_id=order["warehouse_id"], lines=[PurchaseLineCreate(**dict(r)) for r in rows]), actor, db)
-    db.execute(__import__("sqlalchemy").text("""
-        update purchases set purchase_order_id=:order
-        where id=:purchase and tenant_id=:tenant and purchase_order_id is null
-    """), {"order":str(order_id),"purchase":str(purchase.id),"tenant":str(actor.tenant_id)})
+    purchase = receive_purchase(PurchaseCreate(number=number, purchase_order_id=order_id, supplier_id=order["supplier_id"], warehouse_id=order["warehouse_id"], lines=[PurchaseLineCreate(**dict(r)) for r in rows]), actor, db)
     db.commit()
     return purchase
