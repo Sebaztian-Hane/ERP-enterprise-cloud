@@ -16,7 +16,7 @@ def change_stock(
         stock = Inventory(tenant_id=tenant_id, product_id=product_id, warehouse_id=warehouse_id, quantity=Decimal("0"))
         db.add(stock)
     if stock.quantity + quantity < 0:
-        raise HTTPException(status_code=422, detail="Existencias insuficientes para completar la venta")
+        raise HTTPException(status_code=422, detail="Existencias insuficientes para completar el movimiento de inventario")
     stock.quantity += quantity
     movement = InventoryMovement(
         tenant_id=tenant_id, product_id=product_id, warehouse_id=warehouse_id,

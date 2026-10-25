@@ -330,10 +330,14 @@ def transfer_stock(request: Request, data: InventoryTransferCreate, actor: Actor
     )
     if idempotency and idempotency.is_replay:
         return replay_response(idempotency)
-    product = db.scalar(select(Product.id).where(Product.id == data.product_id, Product.tenant_id == actor.tenant_id, Product.is_active.is_(True)))
+    product = db.scalar(select(Product).where(Product.id == data.product_id, Product.tenant_id == actor.tenant_id, Product.is_active.is_(True)))
     warehouses = set(db.scalars(select(Warehouse.id).where(Warehouse.id.in_({data.source_warehouse_id, data.destination_warehouse_id}), Warehouse.tenant_id == actor.tenant_id, Warehouse.is_active.is_(True))).all())
     if not product or warehouses != {data.source_warehouse_id, data.destination_warehouse_id}:
         raise HTTPException(status_code=404, detail="Producto o almacén no encontrado en la empresa activa")
+    if product.tracking_mode == "serial" and not data.serial_numbers:
+        raise HTTPException(status_code=422, detail="Un producto serializado requiere las series exactas desde el borrador de transferencia")
+    if product.tracking_mode != "serial" and data.serial_numbers:
+        raise HTTPException(status_code=422, detail="Solo los productos serializados admiten series en una transferencia")
     # Creation only records the intention.  Stock leaves the source warehouse
     # at dispatch and reaches the destination at receipt, preserving transit.
     transfer = InventoryTransfer(tenant_id=actor.tenant_id, status="draft", **data.model_dump())
@@ -439,66 +443,89 @@ def receive_transfer(transfer_id: UUID, request: Request, actor: Actor = Depends
     ).with_for_update())
     if not product:
         raise HTTPException(status_code=409, detail="El producto de la transferencia ya no existe")
-    change_stock(db, tenant_id=actor.tenant_id, product_id=transfer.product_id, warehouse_id=transfer.destination_warehouse_id,
-                 quantity=transfer.quantity, movement_type="transfer_in", reference=transfer.number, unit_cost=product.average_cost)
-    if product.tracking_mode == "lot":
-        allocations = db.execute(text("""
-            select a.lot_id, a.quantity from inventory_movement_allocations a
-            join inventory_movements m on m.id=a.inventory_movement_id and m.tenant_id=a.tenant_id
-            where a.tenant_id=:tenant and m.product_id=:product and m.warehouse_id=:source
-              and m.reference=:reference and m.movement_type='lot_issue'
-            for update of a
-        """), {"tenant": str(actor.tenant_id), "product": str(product.id), "source": str(transfer.source_warehouse_id), "reference": transfer.number}).mappings().all()
-        if sum((Decimal(str(row["quantity"])) for row in allocations), Decimal("0")) != transfer.quantity:
-            raise HTTPException(status_code=409, detail="No se encontró una trazabilidad de lotes completa para la transferencia")
-        source_lots = {lot.id: lot for lot in db.scalars(select(InventoryLot).where(
-            InventoryLot.tenant_id == actor.tenant_id,
-            InventoryLot.id.in_([row["lot_id"] for row in allocations]),
-        ).with_for_update()).all()}
-        for row in allocations:
-            source_lot = source_lots.get(row["lot_id"])
-            if not source_lot:
-                raise HTTPException(status_code=409, detail="No se encontró un lote de la transferencia")
-            destination_lot = db.scalar(select(InventoryLot).where(
-                InventoryLot.tenant_id == actor.tenant_id, InventoryLot.product_id == product.id,
-                InventoryLot.warehouse_id == transfer.destination_warehouse_id,
-                InventoryLot.lot_number == source_lot.lot_number,
-            ).with_for_update())
-            moved = Decimal(str(row["quantity"]))
-            if destination_lot:
-                if destination_lot.unit_cost != source_lot.unit_cost or destination_lot.expiration_date != source_lot.expiration_date:
-                    raise HTTPException(status_code=409, detail="El lote ya existe en destino con costo o vencimiento distinto")
-                destination_lot.available_quantity += moved
-                destination_lot.original_quantity += moved
-                destination_lot.status = "available"
-            else:
-                db.add(InventoryLot(tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=transfer.destination_warehouse_id,
-                    lot_number=source_lot.lot_number, original_quantity=moved, available_quantity=moved,
-                    unit_cost=source_lot.unit_cost, expiration_date=source_lot.expiration_date, status="available", created_by=actor.user_id))
-    elif product.tracking_mode == "serial":
-        allocations = db.execute(text("""
-            select a.serial_id from inventory_movement_allocations a
-            join inventory_movements m on m.id=a.inventory_movement_id and m.tenant_id=a.tenant_id
-            where a.tenant_id=:tenant and m.product_id=:product and m.warehouse_id=:source
-              and m.reference=:reference and m.movement_type='serial_issue'
-            for update of a
-        """), {"tenant": str(actor.tenant_id), "product": str(product.id), "source": str(transfer.source_warehouse_id), "reference": transfer.number}).mappings().all()
-        if len(allocations) != int(transfer.quantity):
-            raise HTTPException(status_code=409, detail="No se encontró una trazabilidad de series completa para la transferencia")
-        records = db.scalars(select(InventorySerial).where(
-            InventorySerial.tenant_id == actor.tenant_id,
-            InventorySerial.id.in_([row["serial_id"] for row in allocations]),
-        ).with_for_update()).all()
-        if len(records) != len(allocations) or any(record.status != "issued" for record in records):
-            raise HTTPException(status_code=409, detail="Una serie de la transferencia no está disponible para recepción")
-        for record in records:
-            record.warehouse_id = transfer.destination_warehouse_id
-            record.status = "available"
-            record.issued_at = None
-    transfer.status = "completed"
-    db.execute(__import__("sqlalchemy").text("update inventory_transfers set received_by=:actor, received_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
-    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
-    complete_idempotency(db, claim=idempotency, response_body=InventoryTransferOut.model_validate(transfer).model_dump(mode="json"), response_status=status.HTTP_200_OK)
-    db.commit()
+    try:
+        # Validate all traceability evidence before increasing the destination
+        # balance. One transaction then commits the inventory quantity and its
+        # lot/serial audit trail atomically.
+        lot_allocations = []
+        serial_allocations = []
+        if product.tracking_mode == "lot":
+            lot_allocations = db.execute(text("""
+                select a.lot_id, a.quantity from inventory_movement_allocations a
+                join inventory_movements m on m.id=a.inventory_movement_id and m.tenant_id=a.tenant_id
+                where a.tenant_id=:tenant and m.product_id=:product and m.warehouse_id=:source
+                  and m.reference=:reference and m.movement_type='lot_issue'
+                for update of a
+            """), {"tenant": str(actor.tenant_id), "product": str(product.id), "source": str(transfer.source_warehouse_id), "reference": transfer.number}).mappings().all()
+            if sum((Decimal(str(row["quantity"])) for row in lot_allocations), Decimal("0")) != transfer.quantity:
+                raise HTTPException(status_code=409, detail="No se encontró una trazabilidad de lotes completa para la transferencia")
+        elif product.tracking_mode == "serial":
+            serial_allocations = db.execute(text("""
+                select a.serial_id from inventory_movement_allocations a
+                join inventory_movements m on m.id=a.inventory_movement_id and m.tenant_id=a.tenant_id
+                where a.tenant_id=:tenant and m.product_id=:product and m.warehouse_id=:source
+                  and m.reference=:reference and m.movement_type='serial_issue'
+                for update of a
+            """), {"tenant": str(actor.tenant_id), "product": str(product.id), "source": str(transfer.source_warehouse_id), "reference": transfer.number}).mappings().all()
+            if len(serial_allocations) != int(transfer.quantity):
+                raise HTTPException(status_code=409, detail="No se encontró una trazabilidad de series completa para la transferencia")
+
+        movement = change_stock(db, tenant_id=actor.tenant_id, product_id=transfer.product_id, warehouse_id=transfer.destination_warehouse_id,
+                                quantity=transfer.quantity, movement_type="transfer_in", reference=transfer.number, unit_cost=product.average_cost)
+        db.flush()
+        if product.tracking_mode == "lot":
+            source_lots = {lot.id: lot for lot in db.scalars(select(InventoryLot).where(
+                InventoryLot.tenant_id == actor.tenant_id,
+                InventoryLot.id.in_([row["lot_id"] for row in lot_allocations]),
+            ).with_for_update()).all()}
+            for row in lot_allocations:
+                source_lot = source_lots.get(row["lot_id"])
+                if not source_lot:
+                    raise HTTPException(status_code=409, detail="No se encontró un lote de la transferencia")
+                destination_lot = db.scalar(select(InventoryLot).where(
+                    InventoryLot.tenant_id == actor.tenant_id, InventoryLot.product_id == product.id,
+                    InventoryLot.warehouse_id == transfer.destination_warehouse_id,
+                    InventoryLot.lot_number == source_lot.lot_number,
+                ).with_for_update())
+                moved = Decimal(str(row["quantity"]))
+                if destination_lot:
+                    if destination_lot.unit_cost != source_lot.unit_cost or destination_lot.expiration_date != source_lot.expiration_date:
+                        raise HTTPException(status_code=409, detail="El lote ya existe en destino con costo o vencimiento distinto")
+                    destination_lot.available_quantity += moved
+                    destination_lot.original_quantity += moved
+                    destination_lot.status = "available"
+                else:
+                    destination_lot = InventoryLot(tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=transfer.destination_warehouse_id,
+                        lot_number=source_lot.lot_number, original_quantity=moved, available_quantity=moved,
+                        unit_cost=source_lot.unit_cost, expiration_date=source_lot.expiration_date, status="available", created_by=actor.user_id)
+                    db.add(destination_lot)
+                    db.flush()
+                db.execute(text("""
+                    insert into inventory_movement_allocations(tenant_id, inventory_movement_id, lot_id, quantity)
+                    values(:tenant, :movement, :lot, :quantity)
+                """), {"tenant": str(actor.tenant_id), "movement": str(movement.id), "lot": str(destination_lot.id), "quantity": moved})
+        elif product.tracking_mode == "serial":
+            records = db.scalars(select(InventorySerial).where(
+                InventorySerial.tenant_id == actor.tenant_id,
+                InventorySerial.id.in_([row["serial_id"] for row in serial_allocations]),
+            ).with_for_update()).all()
+            if len(records) != len(serial_allocations) or any(record.status != "issued" for record in records):
+                raise HTTPException(status_code=409, detail="Una serie de la transferencia no está disponible para recepción")
+            for record in records:
+                record.warehouse_id = transfer.destination_warehouse_id
+                record.status = "available"
+                record.issued_at = None
+                db.execute(text("""
+                    insert into inventory_movement_allocations(tenant_id, inventory_movement_id, serial_id, quantity)
+                    values(:tenant, :movement, :serial, 1)
+                """), {"tenant": str(actor.tenant_id), "movement": str(movement.id), "serial": str(record.id)})
+        transfer.status = "completed"
+        db.execute(__import__("sqlalchemy").text("update inventory_transfers set received_by=:actor, received_at=now() where id=:id and tenant_id=:tenant"), {"actor": str(actor.user_id), "id": str(transfer.id), "tenant": str(actor.tenant_id)})
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="receive_transfer", module="inventory", entity="inventory_transfer", entity_id=transfer.id)
+        complete_idempotency(db, claim=idempotency, response_body=InventoryTransferOut.model_validate(transfer).model_dump(mode="json"), response_status=status.HTTP_200_OK)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     db.refresh(transfer)
     return transfer
