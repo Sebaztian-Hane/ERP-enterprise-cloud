@@ -38,7 +38,7 @@ from app.models.entities import (
     UnitOfMeasure,
     Warehouse,
 )
-from app.security.auth import Actor, require_owner_or_admin
+from app.security.auth import Actor, require_owner_or_admin, require_second_factor
 from app.services.accounting import post_entry, split_tax
 from app.services.audit import record
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
@@ -432,6 +432,7 @@ async def commit_import(
     request: Request,
     file: UploadFile = File(...),
     actor: Actor = Depends(require_owner_or_admin),
+    _: Actor = Depends(require_second_factor),
     db: Session = Depends(get_db),
 ):
     # UploadFile is a stream.  Its digest is part of the request identity, so a

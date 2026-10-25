@@ -6,6 +6,7 @@
 - Toda consulta operativa se filtra por `tenant_id`; RLS replica el aislamiento para el acceso directo a Supabase.
 - Las credenciales APISUNAT y el estado de revocación de sesiones tienen RLS de denegación explícita: solo la API del servidor puede leerlos o modificarlos.
 - Una contraseña cambiada o la acción **Cerrar sesiones en todos los dispositivos** invalida de inmediato los tokens ya emitidos en la API. El cliente borra además su sesión local.
+- Cada usuario puede configurar TOTP desde **Mi perfil**. Las invitaciones y cambios de acceso, importaciones definitivas, aprobaciones firmadas, ejecución de pagos, ejecución de ajustes y anulación de CPE requieren una sesión Supabase con nivel `aal2`.
 - Acciones mutables relevantes conservan auditoría e idempotencia.
 
 ## Rotación de secretos
@@ -31,6 +32,7 @@ Prioridad de rotación si alguno fue compartido en un canal no seguro:
 3. Consultar el asesor de seguridad de Supabase: no deben aparecer tablas expuestas sin RLS o políticas.
 4. Probar con dos tenants que un ID de la empresa A no puede leerse, cambiarse ni procesarse desde la empresa B.
 5. Confirmar que un cambio de contraseña y el cierre global de sesiones exigen iniciar sesión de nuevo.
+6. Configurar un autenticador TOTP en una cuenta de prueba y verificar que una acción sensible falla antes de validar MFA y funciona únicamente con una sesión `aal2`.
 
 ## Límites de la plataforma actual
 

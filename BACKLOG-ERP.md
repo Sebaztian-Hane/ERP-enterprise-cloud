@@ -1,49 +1,44 @@
 # Ruta pendiente — EnterpriseCloud ERP
 
-> Actualizado: 25 de octubre de 2026. Estado: piloto funcional con flujo comercial e inventario base operativos. Este documento contiene **solo trabajo pendiente** y su secuencia recomendada.
+> Actualizado: 25 de octubre de 2026. Estado: piloto funcional; este documento contiene solo trabajo pendiente y el orden recomendado.
 
 ## Criterios no negociables
 
-- Cada consulta, comando, archivo, exportación y búsqueda debe aislarse por `tenant_id`.
-- Una tarea se cierra únicamente con pruebas unitarias, de integración, autorización y regresión visual cuando aplique.
-- Las operaciones de inventario, tesorería, contabilidad y fiscalidad deben ser idempotentes, auditables y trazables hasta su documento de origen.
-- La firma actual es interna y no se presentará como firma digital cualificada o legal hasta integrar un proveedor de certificados.
-- APISUNAT seguirá siendo el proveedor de facturación electrónica; no se implementará emisión SUNAT nativa.
+- Toda consulta, comando, documento, exportación y búsqueda debe aislarse por `tenant_id`.
+- Una tarea se cierra solo con pruebas unitarias, de integración, autorización y regresión visual cuando aplique.
+- Las operaciones fiscales, contables, financieras e inventariables deben ser idempotentes, auditables y trazables hasta el documento origen.
+- La firma actual es interna; no se presentará como firma cualificada o legal hasta integrar un proveedor de certificados.
+- APISUNAT continuará como proveedor de facturación electrónica; no se implementará emisión SUNAT nativa.
 
 ## Prioridad 0 — Seguridad y operación
 
-### Pendiente inmediato
+- [ ] Rotar credenciales usadas durante desarrollo (Supabase, Brevo, DeColecta, Gemini, APISUNAT y webhooks), mantenerlas solo como secretos de servidor y comprobar cada integración.
+- [x] MFA TOTP desde Mi perfil y exigencia de sesión `aal2` para cambios de acceso, importaciones definitivas, aprobaciones firmadas, pagos ejecutados, ajustes ejecutados y anulaciones CPE. Ampliar la cobertura al crear comandos críticos nuevos.
+- [ ] Separar el consumidor outbox en workers/colas para CPE, correo, importaciones, reportes, conciliaciones e integraciones externas; el worker embebido es transitorio.
+- [ ] Definir backups automáticos, restauración verificada, retención, responsables, RPO/RTO y runbooks de incidentes.
+- [ ] Añadir monitoreo y alertas para disponibilidad, 5xx, colas detenidas, CPE inciertos, correo, capacidad de base de datos y auditoría anómala.
+- [ ] Evaluar enumeración/revocación por dispositivo con las capacidades del proveedor de identidad. La revocación global ya existe.
+- [ ] Añadir a CI/CD escaneo de dependencias, pruebas de migración, smoke tests y despliegues graduales.
 
-- [ ] Rotar las credenciales que se usaron durante desarrollo (Supabase, Brevo, DeColecta, Gemini, APISUNAT y webhooks). Guardarlas únicamente como secretos de servidor y verificar cada integración después de rotarla.
-- [ ] Añadir MFA o reautenticación reciente para propietario, administrador, tesorería y contabilidad; exigirla antes de pagos, cambios fiscales, cambios de acceso y acciones irreversibles.
-- [ ] Separar el consumidor de outbox en workers/colas para CPE, correos, importaciones, reportes, conciliaciones e integraciones externas. El worker embebido actual es una solución transitoria.
-- [ ] Definir backups automáticos, una restauración de prueba periódica, retención, responsables, RPO/RTO y runbooks de incidente.
-- [ ] Incorporar monitoreo y alertas: disponibilidad, errores 5xx, colas detenidas, CPE inciertos, fallas de correo, consumo de base de datos y auditoría anómala.
-
-### Pendiente posterior
-
-- [ ] Evaluar enumeración/revocación por dispositivo según las capacidades del proveedor de identidad. La revocación global ya existe, pero no existe un listado fiable de sesiones remotas.
-- [ ] Añadir escaneo de dependencias, prueba de migraciones, smoke tests y despliegues graduales en CI/CD.
-
-## Prioridad 1 — Cierre del flujo comercial e inventario
+## Prioridad 1 — Flujo comercial e inventario
 
 ### Ventas
 
-- [ ] Integrar nota de crédito CPE vinculada a un comprobante aceptado por APISUNAT. Hasta entonces debe mantenerse el bloqueo de devolución operativa para ventas con CPE activo.
+- [ ] Integrar nota de crédito CPE vinculada a un comprobante aceptado por APISUNAT. Mantener el bloqueo actual de devoluciones con CPE activo hasta completarlo.
 - [ ] Formalizar máquina de estados y transiciones autorizadas para cotización, pedido, entrega, comprobante, cobro y devolución.
-- [ ] Recuperar borradores de formularios ante recarga, navegación o error de red.
+- [ ] Recuperar borradores de formularios ante recarga, navegación o fallo de red.
 - [ ] Consolidar precios por cliente, moneda, lista de precios, descuento y aprobación excepcional.
 
 ### Compras
 
-- [ ] Añadir solicitud de compra, cuadro comparativo de proveedores y aprobación previa a la orden.
+- [ ] Añadir solicitud de compra, cuadro comparativo y aprobación previa a la orden.
 - [ ] Incorporar devoluciones parciales y tolerancias configurables de cantidad/precio con autorización.
 
 ### Inventario
 
 - [ ] Reconstruir y conciliar existencias desde kardex, con reporte de diferencias y corrección controlada.
-- [ ] Elegir, documentar y probar la política de costeo aplicable: promedio ponderado o FIFO.
-- [ ] Reforzar lotes, series, vencimientos y alertas de acuerdo con el sector de cada tenant.
+- [ ] Elegir, documentar y probar costeo promedio ponderado o FIFO.
+- [ ] Reforzar lotes, series, vencimientos y alertas por sector del tenant.
 - [ ] Ejecutar pruebas de concurrencia para reservas, recepciones, transferencias, ajustes y devoluciones.
 
 ## Prioridad 2 — Facturación, tesorería y contabilidad
@@ -51,23 +46,23 @@
 ### Facturación electrónica
 
 - [ ] Modelar estados CPE: borrador, validado, reservado, enviado, aceptado, observado, rechazado e incierto.
-- [ ] Persistir XML, CDR, PDF, hash, respuesta del proveedor y trazabilidad por cada comprobante.
-- [ ] Reconsultar automáticamente comprobantes con timeout; nunca reemitir ciegamente.
-- [ ] Implementar notas de crédito y débito con vínculo y validaciones contra el comprobante original.
+- [ ] Persistir XML, CDR, PDF, hash, respuesta del proveedor y trazabilidad por comprobante.
+- [ ] Reconsultar automáticamente comprobantes con timeout; nunca reemitir a ciegas.
+- [ ] Implementar notas de crédito y débito con vínculo y validación del comprobante original.
 - [ ] Terminar configuración fiscal por tenant: RUC, sucursal, series, numeración y credenciales APISUNAT cifradas.
 
 ### Tesorería
 
 - [ ] Importar extractos bancarios y conciliar mediante reglas de matching.
-- [ ] Crear una cola de excepciones para pagos inciertos, duplicados, sin referencia o con diferencia.
+- [ ] Crear cola de excepciones para pagos inciertos, duplicados, sin referencia o con diferencias.
 - [ ] Incorporar flujo de caja proyectado, cobranza y alertas de mora.
-- [ ] Aplicar doble control y segregación de funciones para pagos, beneficiarios nuevos y operaciones de riesgo.
+- [ ] Aplicar doble control y segregación para pagos, beneficiarios nuevos y operaciones de riesgo.
 
 ### Contabilidad
 
-- [ ] Garantizar en base de datos que cada asiento esté balanceado y vinculado a su documento origen.
-- [ ] Hacer inmutables los asientos publicados; las correcciones deben generar reversos trazables.
-- [ ] Cerrar periodos y permitir reapertura solo con autorización y auditoría.
+- [ ] Garantizar en base de datos que cada asiento esté balanceado y ligado a su documento origen.
+- [ ] Hacer inmutables los asientos publicados; corregir únicamente con reversos trazables.
+- [ ] Cerrar periodos, permitir reapertura autorizada y registrar evidencia de auditoría.
 - [ ] Incorporar PCGE, centros de costo, dimensiones y diferencias de cambio cuando corresponda.
 - [ ] Generar conciliación diaria subledger–libro mayor y reportes reproducibles de diario, mayor, balance y cierre.
 
@@ -76,43 +71,43 @@
 - [ ] Configurar matrices de aprobación por módulo, importe, almacén, centro de costo, área y riesgo.
 - [ ] Agregar delegación temporal, SLA, escalamiento, recordatorios y suplencias auditables.
 - [ ] Extender segregación de funciones para pagos, descuentos, ajustes de stock y órdenes de compra.
-- [ ] Versionar documentos, adjuntos, hashes, estados y evidencia de firma de forma inmutable.
-- [ ] Crear la pantalla de verificación de documentos firmados internamente.
-- [ ] Integrar certificado y firma digital cualificada cuando se seleccione el proveedor legal.
+- [ ] Versionar documentos, adjuntos, hashes, estados y evidencia de firma de modo inmutable.
+- [ ] Crear pantalla de verificación de documentos firmados internamente.
+- [ ] Integrar certificado y firma digital cualificada cuando se seleccione proveedor legal.
 
 ## Prioridad 4 — Datos maestros, importación y experiencia
 
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de precios y condiciones de pago.
 - [ ] Detectar, fusionar y auditar duplicados de clientes, proveedores y productos.
 - [ ] Completar catálogos peruanos: documentos, ubigeo, unidades, afectación IGV y motivos de notas/traslados.
-- [ ] Mejorar importación Excel: simulación, prevalidación, mapeos reutilizables, errores por fila, idempotencia y reversión.
+- [ ] Mejorar Excel: simulación, prevalidación, mapeos reutilizables, errores por fila, idempotencia y reversión.
 - [ ] Sustituir selects nativos restantes, especialmente en Compras, por buscadores con modal y tabla paginada.
 - [ ] Estandarizar tablas, paginación, filtros, estados vacíos, modo oscuro y experiencia móvil.
-- [ ] Añadir pruebas E2E visuales previas a cada despliegue.
+- [ ] Añadir pruebas E2E visuales antes de cada despliegue.
 
 ## Prioridad 5 — Reportes, IA y plataforma SaaS
 
 - [ ] Formalizar diccionario de KPIs y filtros obligatorios por tenant, periodo, moneda y estado.
 - [ ] Ejecutar reportes y exportaciones pesadas en segundo plano, con enlaces temporales y auditoría.
 - [ ] Completar paneles por rol y reportes programados.
-- [ ] Robustecer RAG: sincronización durable, filtros por tenant/rol/módulo, información desactualizada y métricas de calidad.
-- [ ] Mantener la IA solo como asistente: nunca debe ejecutar por sí misma acciones financieras, contables o fiscales.
-- [ ] Implementar cuotas, planes, onboarding/offboarding, exportación y retención de datos por tenant.
+- [ ] Robustecer RAG: sincronización durable, filtros por tenant/rol/módulo, frescura de información y métricas de calidad.
+- [ ] Mantener IA como asistencia: nunca debe ejecutar sola acciones financieras, contables o fiscales.
+- [ ] Implementar cuotas, planes, onboarding/offboarding, exportación y retención por tenant.
 
-## Orden óptimo de ejecución
+## Orden óptimo
 
 1. Rotación de secretos, MFA/reauth, respaldo y monitoreo.
 2. Estados CPE y resiliencia APISUNAT; nota de crédito CPE.
-3. Concurrencia y costeo de inventario; estados comerciales y recuperación de borradores.
+3. Concurrencia y costeo de inventario; estados comerciales y borradores.
 4. Tesorería, conciliación y cierres contables.
-5. Aprobaciones documentales, firma interna verificable y segregación ampliada.
-6. Datos maestros, importación y experiencia de usuario.
+5. Aprobaciones documentales, firma verificable y segregación ampliada.
+6. Datos maestros, importación y experiencia.
 7. Workers dedicados, reportes asíncronos, IA y capacidades SaaS.
 
-## Dependencias externas o fuera de alcance actual
+## Dependencias externas y fuera de alcance actual
 
-- Rotación real de secretos: necesita ejecutar el cambio en cada proveedor antes de actualizar Render/Vercel.
-- Facturación SUNAT nativa: fuera de alcance; se mantiene APISUNAT.
+- La rotación real de secretos requiere cambiarlos en cada proveedor antes de actualizar Render/Vercel.
+- Facturación SUNAT nativa: fuera de alcance; se usa APISUNAT.
 - Firma con certificado y validez legal: pendiente de proveedor seleccionado.
 - Protección de contraseñas filtradas de Supabase: excluida por decisión de costos.
 - Nómina/RR. HH., manufactura/MRP, consolidación empresarial y microservicios: fases futuras.

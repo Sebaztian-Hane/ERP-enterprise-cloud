@@ -18,6 +18,10 @@ class Actor(BaseModel):
     user_id: UUID
     tenant_id: UUID
     role_code: str
+    # Supabase adds this claim after a verified MFA challenge.  It is signed
+    # into the JWT, unlike user metadata, and is therefore safe for an API
+    # authorization decision.
+    assurance_level: str = "aal1"
 
 
 def token_issued_at(claims: dict) -> int:
@@ -59,6 +63,12 @@ class PlatformActor(BaseModel):
 
     user_id: UUID
     email: str
+    assurance_level: str = "aal1"
+
+
+def assurance_level(claims: dict) -> str:
+    """Return a normalized Supabase authenticator assurance level."""
+    return "aal2" if claims.get("aal") == "aal2" else "aal1"
 
 
 @lru_cache
@@ -101,7 +111,12 @@ def get_actor(
     if not membership:
         raise HTTPException(status_code=403, detail="No tiene acceso a la empresa activa")
     ensure_token_not_revoked(db, user_id, claims)
-    return Actor(user_id=user_id, tenant_id=x_tenant_id, role_code=membership.role_code)
+    return Actor(
+        user_id=user_id,
+        tenant_id=x_tenant_id,
+        role_code=membership.role_code,
+        assurance_level=assurance_level(claims),
+    )
 
 
 def get_user_id(authorization: str = Header(...), db: Session = Depends(get_db)) -> UUID:
@@ -131,13 +146,23 @@ def platform_actor_from_claims(claims: dict) -> PlatformActor:
     allowed = get_settings().platform_admin_email_set
     if not isinstance(email, str) or email.casefold() not in allowed:
         raise HTTPException(status_code=403, detail="No tiene acceso a la consola de proveedor")
-    return PlatformActor(user_id=user_id, email=email)
+    return PlatformActor(user_id=user_id, email=email, assurance_level=assurance_level(claims))
 
 
 def require_platform_admin(authorization: str = Header(...)) -> PlatformActor:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Se requiere un token Bearer")
     return platform_actor_from_claims(decode_access_token(authorization.removeprefix("Bearer ")))
+
+
+def require_second_factor(actor: Actor = Depends(get_actor)) -> Actor:
+    """Require an authenticated TOTP/second-factor challenge for high risk work."""
+    if actor.assurance_level != "aal2":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Esta operación requiere verificación en dos pasos. Configúrala o verifícala desde Mi perfil.",
+        )
+    return actor
 
 
 ROLE_PERMISSIONS = {

@@ -9,7 +9,7 @@ from app.db.session import get_db
 from app.models.entities import AccountPayable, AccountReceivable, Customer, Payment, PaymentAllocation, Supplier
 from app.schemas.payments import PaymentCreate, PaymentOut
 from app.schemas.pagination import paginate
-from app.security.auth import Actor, require_permission
+from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.accounting import post_entry
 from app.services.approval_documents import create_payment_evidence
@@ -136,7 +136,7 @@ def create_payment(request: Request, response: Response, data: PaymentCreate, ac
 
 
 @router.post("/{payment_id}/execute", response_model=PaymentOut)
-def execute_supplier_payment(payment_id: UUID, actor: Actor = Depends(require_permission("payments:write")), db: Session = Depends(get_db)):
+def execute_supplier_payment(payment_id: UUID, actor: Actor = Depends(require_permission("payments:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     payment = db.scalar(select(Payment).where(Payment.id == payment_id, Payment.tenant_id == actor.tenant_id, Payment.payment_type == "payment", Payment.status == "approved").with_for_update())
     if not payment:
         raise HTTPException(status_code=409, detail="El pago debe estar aprobado antes de ejecutarse")

@@ -11,7 +11,7 @@ from app.models.entities import AccountReceivable, Branch, Customer, ElectronicD
 from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
-from app.security.auth import Actor, require_permission
+from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, void_bill
 from app.services.traceability import issue_tracked_stock, return_tracked_sale_stock
@@ -335,7 +335,7 @@ def refresh_electronic_document(sale_id: str, actor: Actor = Depends(require_per
 
 
 @router.post("/{sale_id}/electronic-document/void", response_model=ElectronicDocumentOut)
-def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
+def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: Actor = Depends(require_permission("electronic_billing:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     _, document = _electronic_document(sale_id, actor, db)
     if not document or not document.provider_document_id:
         raise HTTPException(status_code=404, detail="La venta no tiene un comprobante electrónico emitido")

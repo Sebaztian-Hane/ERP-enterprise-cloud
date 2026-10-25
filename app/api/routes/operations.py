@@ -7,7 +7,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import Inventory, Product, Warehouse
-from app.security.auth import Actor, require_permission
+from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.approval_documents import append_internal_decision_evidence, create_inventory_count_evidence
 from app.services.internal_signatures import (
@@ -453,7 +453,7 @@ def list_approvals(actor: Actor = Depends(require_permission("approvals:read")),
 
 
 @router.post("/approvals/signing-keys", status_code=status.HTTP_201_CREATED)
-def register_signing_key(data: SigningKeyIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+def register_signing_key(data: SigningKeyIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     """Register only a public browser key; the private key never reaches the ERP."""
     try:
         validate_p256_jwk(data.public_jwk)
@@ -472,7 +472,7 @@ def register_signing_key(data: SigningKeyIn, actor: Actor = Depends(require_perm
 
 
 @router.post("/approvals/{request_id}/signature-challenge")
-def create_signature_challenge(request_id: UUID, decision: str, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+def create_signature_challenge(request_id: UUID, decision: str, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if decision not in {"approved", "rejected"}:
         raise HTTPException(status_code=422, detail="Decisión de firma no válida")
     row = db.execute(text("""
@@ -525,7 +525,7 @@ def _verify_decision_signature(request_id: UUID, data: DecisionIn, decision: str
 
 
 @router.post("/approvals/{request_id}/approve")
-def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     signature = _verify_decision_signature(request_id, data, "approved", actor, db)
     row = db.execute(text("""update approval_requests r set status='approved', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
@@ -566,7 +566,7 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
 
 
 @router.post("/approvals/{request_id}/reject")
-def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), db: Session = Depends(get_db)):
+def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(require_permission("approvals:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     signature = _verify_decision_signature(request_id, data, "rejected", actor, db)
     row = db.execute(text("""update approval_requests r set status='rejected', decided_by=:actor, decision_note=:note, decided_at=now(), updated_at=now()
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor

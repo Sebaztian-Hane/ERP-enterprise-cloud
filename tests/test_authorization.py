@@ -9,7 +9,7 @@ from app.api.routes.customers import list_customers
 from app.api.routes.tenants import ensure_active_owner_remains, require_owner_role_change
 from app.schemas.common import MembershipUpdate
 from app.security import auth
-from app.security.auth import Actor, ensure_token_not_revoked, get_actor, require_permission, token_issued_at
+from app.security.auth import Actor, ensure_token_not_revoked, get_actor, require_permission, require_second_factor, token_issued_at
 
 
 class ScalarResult:
@@ -109,3 +109,12 @@ def test_token_issued_at_rejects_missing_or_boolean_claims():
         with pytest.raises(HTTPException) as error:
             token_issued_at(claims)
         assert error.value.status_code == 401
+
+
+def test_high_risk_action_requires_aal2_session():
+    aal1_actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="owner")
+    with pytest.raises(HTTPException) as error:
+        require_second_factor(aal1_actor)
+    assert error.value.status_code == 403
+    aal2_actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="owner", assurance_level="aal2")
+    assert require_second_factor(aal2_actor) == aal2_actor

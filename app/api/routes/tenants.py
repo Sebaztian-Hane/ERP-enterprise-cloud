@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import AuditLog, Tenant, TenantMembership
 from app.schemas.common import AuditLogOut, MembershipCreate, MembershipInvite, MembershipOut, MembershipUpdate, TenantCreate, TenantOut
-from app.security.auth import Actor, get_user_id, require_permission
+from app.security.auth import Actor, get_user_id, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.supabase_admin import create_user
@@ -62,7 +62,7 @@ def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")
 
 @router.post("/memberships", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("20/minute")
-def add_membership(request: Request, response: Response, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+def add_membership(request: Request, response: Response, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
     require_owner_role_change(actor, data.role_code)
@@ -81,7 +81,7 @@ def add_membership(request: Request, response: Response, data: MembershipCreate,
 
 @router.post("/invitations", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
-async def invite_member(request: Request, response: Response, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+async def invite_member(request: Request, response: Response, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
     require_owner_role_change(actor, data.role_code)
@@ -118,7 +118,7 @@ async def invite_member(request: Request, response: Response, data: MembershipIn
 
 @router.patch("/memberships/{membership_id}", response_model=MembershipOut)
 @limiter.limit("20/minute")
-def update_membership(request: Request, response: Response, membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+def update_membership(request: Request, response: Response, membership_id: UUID, data: MembershipUpdate, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == actor.tenant_id))
     if not membership:
         raise HTTPException(status_code=404, detail="Membresía no encontrada")

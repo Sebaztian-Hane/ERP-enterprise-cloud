@@ -8,7 +8,7 @@ from app.db.session import get_db
 from app.models.entities import Branch, Inventory, InventoryLot, InventoryMovement, InventorySerial, InventoryTransfer, Product, Warehouse
 from app.schemas.inventory import InventoryLotReceive, InventoryMovementOut, InventoryOut, InventorySerialReceive, InventoryTransferCreate, InventoryTransferOut, StockAdjustment, WarehouseCreate, WarehouseOut, WarehouseUpdate
 from app.schemas.pagination import paginate
-from app.security.auth import Actor, require_permission
+from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.approval_documents import create_inventory_adjustment_evidence
 from app.services.stock import change_stock
@@ -283,7 +283,7 @@ def adjust_stock(request: Request, data: StockAdjustment, actor: Actor = Depends
 
 
 @router.post("/adjustments/{adjustment_id}/execute", response_model=InventoryMovementOut)
-def execute_adjustment(adjustment_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), db: Session = Depends(get_db)):
+def execute_adjustment(adjustment_id: UUID, actor: Actor = Depends(require_permission("inventory:write")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     adjustment = db.execute(text("""
         select * from inventory_adjustment_requests
         where id=:id and tenant_id=:tenant and status='approved' for update
