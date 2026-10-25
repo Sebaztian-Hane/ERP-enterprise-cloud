@@ -26,7 +26,7 @@
 
 - [ ] Integrar nota de crédito CPE vinculada a un comprobante aceptado por APISUNAT. Mantener el bloqueo actual de devoluciones con CPE activo hasta completarlo.
 - [ ] Formalizar máquina de estados y transiciones autorizadas para cotización, pedido, entrega, comprobante, cobro y devolución.
-- [ ] Recuperar borradores de formularios ante recarga, navegación o fallo de red.
+- [x] Recuperar borradores de formularios de venta y compra ante recarga, navegación o fallo de red, aislados por usuario, tenant y tipo de operación.
 - [ ] Consolidar precios por cliente, moneda, lista de precios, descuento y aprobación excepcional.
 
 ### Compras
@@ -36,9 +36,9 @@
 
 ### Inventario
 
-- [ ] Reconstruir y conciliar existencias desde kardex, con reporte de diferencias y corrección controlada.
-- [ ] Elegir, documentar y probar costeo promedio ponderado o FIFO.
-- [ ] Reforzar lotes, series, vencimientos y alertas por sector del tenant.
+- [x] Conciliar existencias contra kardex con reporte de diferencias y corrección exclusivamente mediante inventario físico aprobado; no se reconstruye stock automáticamente.
+- [x] Soportar costo promedio ponderado y FIFO por producto, con costos conservados en los movimientos y en la trazabilidad.
+- [x] Trazar lotes, series, vencimientos y transferencias entre almacenes; quedan pendientes alertas especializadas por sector.
 - [ ] Ejecutar pruebas de concurrencia para reservas, recepciones, transferencias, ajustes y devoluciones.
 
 ## Prioridad 2 — Facturación, tesorería y contabilidad
