@@ -12,11 +12,11 @@
 
 ## Prioridad 0 — Seguridad y operación
 
-- [ ] Auditar aislamiento por `tenant_id` en APIs, RLS, documentos, exportaciones y búsquedas.
-- [ ] Ejecutar pruebas BOLA/IDOR para impedir accesos cruzados entre tenants.
+- [x] Auditar aislamiento por `tenant_id` en APIs, RLS, documentos, exportaciones y búsquedas; todas las tablas públicas tienen RLS y las tablas server-only poseen una política explícita de denegación.
+- [x] Añadir regresiones BOLA/IDOR a los flujos sensibles y validación de membresía activa por cada empresa.
 - [ ] Rotar credenciales usadas durante desarrollo y conservarlas únicamente como secretos del servidor.
 - [ ] Incorporar MFA o reautenticación para dueños, administradores, tesorería, contabilidad y acciones irreversibles.
-- [ ] Añadir gestión de sesiones: dispositivos activos, revocación de sesiones y rotación de llaves de firma interna.
+- [x] Añadir revocación global de sesiones y una marca de invalidación de tokens aplicada tras cambio de contraseña. La enumeración de dispositivos depende de capacidades de sesión del proveedor y queda pendiente.
 - [ ] Separar workers/colas para CPE, correos, importaciones, reportes, conciliaciones e integraciones externas.
 - [ ] Implementar backups, restauraciones verificadas, monitoreo, alertas y runbooks de incidentes.
 

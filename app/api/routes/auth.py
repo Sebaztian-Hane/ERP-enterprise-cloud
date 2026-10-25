@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import PasswordChangeCode, Tenant, TenantMembership
 from app.schemas.common import Message, PasswordChangeConfirm, PasswordChangeRequest, TenantOut
-from app.security.auth import Actor, get_actor, get_user_id
+from app.security.auth import Actor, get_actor, get_user_id, revoke_user_tokens
 from app.services.audit import record
 from app.services.brevo import password_code_html, send_brevo_email
 from app.services.supabase_admin import get_user_email, update_password
@@ -86,6 +86,22 @@ async def confirm_password_change(request: Request, response: Response, data: Pa
         raise HTTPException(status_code=422, detail="El código no es válido.")
     await update_password(get_settings(), user_id=actor.user_id, password=data.new_password)
     challenge.used_at = now
+    revoke_user_tokens(db, actor.user_id)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="change_password", module="profile", entity="password_change_code", entity_id=challenge.id)
     db.commit()
-    return Message(detail="Tu contraseña se actualizó correctamente.")
+    return Message(detail="Tu contraseña se actualizó. Por seguridad, vuelve a iniciar sesión en todos tus dispositivos.")
+
+
+@router.post("/sessions/revoke-all", response_model=Message)
+@limiter.limit("3/15minute")
+def revoke_all_sessions(request: Request, response: Response, actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+    """Close every ERP API session for the authenticated person.
+
+    The frontend clears its local Supabase session after this response. The
+    server watermark also rejects the already-issued access tokens immediately,
+    rather than waiting for their normal JWT expiry.
+    """
+    revoke_user_tokens(db, actor.user_id)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="revoke_all_sessions", module="profile", entity="user_security_state", entity_id=None)
+    db.commit()
+    return Message(detail="Las sesiones activas fueron revocadas. Inicia sesión nuevamente.")

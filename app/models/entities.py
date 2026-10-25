@@ -153,6 +153,21 @@ class PasswordChangeCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class UserSecurityState(Base):
+    """Server-side invalidation watermark for Supabase access tokens.
+
+    Supabase access tokens remain cryptographically valid until their expiry,
+    even if a refresh token is revoked.  This watermark is checked by our API
+    on every authenticated request so a password reset or an explicit
+    "close all sessions" action has an immediate effect here.
+    """
+
+    __tablename__ = "user_security_states"
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    valid_after_iat: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class Customer(TimestampedTenantModel):
     __tablename__ = "customers"
     __table_args__ = (UniqueConstraint("tenant_id", "code"), Index("ix_customers_tenant_name", "tenant_id", "name"))

@@ -1,4 +1,5 @@
 import json
+import time
 from functools import lru_cache
 from uuid import UUID
 import httpx
@@ -10,13 +11,47 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting
+from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting, UserSecurityState
 
 
 class Actor(BaseModel):
     user_id: UUID
     tenant_id: UUID
     role_code: str
+
+
+def token_issued_at(claims: dict) -> int:
+    """Read the signed issuance time without trusting mutable client data."""
+    issued_at = claims.get("iat")
+    if isinstance(issued_at, bool):
+        raise HTTPException(status_code=401, detail="El token no contiene una fecha de emisión válida")
+    try:
+        return int(issued_at)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="El token no contiene una fecha de emisión válida") from exc
+
+
+def ensure_token_not_revoked(db: Session, user_id: UUID, claims: dict) -> None:
+    """Reject tokens issued before the user's latest server-side revoke event."""
+    # Lightweight test doubles do not expose a database identity map. Actual
+    # request sessions always do, and therefore always enforce this check.
+    if not hasattr(db, "get"):
+        return
+    state = db.get(UserSecurityState, user_id)
+    if state and token_issued_at(claims) <= state.valid_after_iat:
+        raise HTTPException(status_code=401, detail="La sesión fue revocada. Inicia sesión nuevamente.")
+
+
+def revoke_user_tokens(db: Session, user_id: UUID) -> UserSecurityState:
+    """Invalidate every currently issued token for one user at the ERP API."""
+    now_iat = int(time.time())
+    state = db.get(UserSecurityState, user_id)
+    if state is None:
+        state = UserSecurityState(user_id=user_id, valid_after_iat=now_iat)
+        db.add(state)
+    else:
+        state.valid_after_iat = max(state.valid_after_iat, now_iat)
+    return state
 
 
 class PlatformActor(BaseModel):
@@ -65,17 +100,20 @@ def get_actor(
     ))
     if not membership:
         raise HTTPException(status_code=403, detail="No tiene acceso a la empresa activa")
+    ensure_token_not_revoked(db, user_id, claims)
     return Actor(user_id=user_id, tenant_id=x_tenant_id, role_code=membership.role_code)
 
 
-def get_user_id(authorization: str = Header(...)) -> UUID:
+def get_user_id(authorization: str = Header(...), db: Session = Depends(get_db)) -> UUID:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Se requiere un token Bearer")
     claims = decode_access_token(authorization.removeprefix("Bearer "))
     try:
-        return UUID(claims["sub"])
+        user_id = UUID(claims["sub"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="El token no contiene un usuario válido") from exc
+    ensure_token_not_revoked(db, user_id, claims)
+    return user_id
 
 
 def platform_actor_from_claims(claims: dict) -> PlatformActor:

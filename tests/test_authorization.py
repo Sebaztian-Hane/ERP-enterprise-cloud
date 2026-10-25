@@ -9,7 +9,7 @@ from app.api.routes.customers import list_customers
 from app.api.routes.tenants import ensure_active_owner_remains, require_owner_role_change
 from app.schemas.common import MembershipUpdate
 from app.security import auth
-from app.security.auth import Actor, get_actor, require_permission
+from app.security.auth import Actor, ensure_token_not_revoked, get_actor, require_permission, token_issued_at
 
 
 class ScalarResult:
@@ -92,3 +92,20 @@ def test_last_active_owner_cannot_be_suspended():
     with pytest.raises(HTTPException) as error:
         ensure_active_owner_remains(db, membership, MembershipUpdate(is_active=False))
     assert error.value.status_code == 422
+
+
+def test_token_revocation_watermark_rejects_old_access_token():
+    user_id = uuid4()
+    state = SimpleNamespace(valid_after_iat=1_000)
+    db = SimpleNamespace(get=lambda model, value: state if value == user_id else None)
+    with pytest.raises(HTTPException) as error:
+        ensure_token_not_revoked(db, user_id, {"iat": 1_000})
+    assert error.value.status_code == 401
+    ensure_token_not_revoked(db, user_id, {"iat": 1_001})
+
+
+def test_token_issued_at_rejects_missing_or_boolean_claims():
+    for claims in ({}, {"iat": True}):
+        with pytest.raises(HTTPException) as error:
+            token_issued_at(claims)
+        assert error.value.status_code == 401
