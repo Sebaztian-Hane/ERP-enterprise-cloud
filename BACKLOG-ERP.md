@@ -24,20 +24,23 @@
 
 ### Ventas
 
-- [ ] Completar el flujo: cotización → pedido → entrega → comprobante → cobro → devolución/nota de crédito.
+- [x] Flujo operativo: cotización → pedido → entrega → comprobante → cobro → devolución interna, con reservas, kardex, cuentas por cobrar, asientos y auditoría.
+- [ ] Emitir nota de crédito CPE vinculada al comprobante aceptado mediante APISUNAT. Mientras no exista esa integración, el ERP bloquea correctamente la devolución operativa de una venta con CPE activo para no dejar una inconsistencia fiscal.
 - [ ] Definir estados y transiciones autorizadas para cada documento comercial.
 - [ ] Recuperar borradores de formularios ante navegación, recarga o fallos de red.
 - [ ] Consolidar precios por cliente, moneda, lista de precios, descuentos y aprobaciones excepcionales.
 
 ### Compras
 
-- [ ] Completar el flujo: solicitud → comparación → orden de compra → recepción → factura de proveedor → pago.
-- [ ] Implementar matching de tres vías entre orden de compra, recepción y factura del proveedor.
-- [ ] Gestionar devoluciones, diferencias de cantidad/precio y tolerancias con aprobación.
+- [x] Flujo operativo de orden de compra → recepción/factura de proveedor → cuenta por pagar → pago.
+- [x] Matching de tres vías estricto entre orden de compra, recepción y factura del proveedor.
+- [x] Devolución completa de compras no pagadas, con reverso de stock, cuenta por pagar, asiento y auditoría.
+- [ ] Incorporar solicitud de compra, cuadro comparativo, devoluciones parciales y tolerancias de cantidad/precio con aprobación.
 
 ### Inventario
 
-- [ ] Implementar y probar reservas, stock en tránsito, cuarentena, mermas, devoluciones y ajustes con motivo obligatorio.
+- [x] Reservas, stock en tránsito, devoluciones completas y ajustes con motivo, aprobación, separación de funciones y auditoría.
+- [x] Transferencias con trazabilidad de lotes FEFO y series exactas tanto al despacho como a la recepción.
 - [ ] Añadir reconstrucción y conciliación de stock a partir del kardex.
 - [ ] Definir y probar política de costeo promedio/FIFO.
 - [ ] Robustecer lotes, series, vencimientos y alertas según el sector del tenant.
