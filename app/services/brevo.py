@@ -27,11 +27,13 @@ async def send_brevo_email(settings: Settings, *, recipient: str, subject: str, 
         raise HTTPException(status_code=502, detail="No fue posible enviar el correo de acceso")
 
 
-def invitation_html(*, temporary_password: str, tenant_name: str, role: str) -> str:
+def invitation_html(*, email: str, temporary_password: str, tenant_name: str, role: str) -> str:
     return (
         "<h2>Acceso a EnterpriseCloud</h2>"
         f"<p>Se te asignó acceso a <strong>{escape(tenant_name)}</strong> con el rol <strong>{escape(role)}</strong>.</p>"
-        "<p>Ingresa con este correo y tu contraseña temporal:</p>"
+        "<p>Usa estas credenciales temporales para ingresar:</p>"
+        f"<p><strong>Correo:</strong> {escape(email)}</p>"
+        "<p><strong>Contraseña temporal:</strong></p>"
         f"<p style=\"font-size:18px;font-weight:bold;letter-spacing:1px\">{escape(temporary_password)}</p>"
         "<p>Por seguridad, cámbiala desde <strong>Mi perfil</strong> al iniciar sesión.</p>"
     )

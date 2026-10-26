@@ -111,7 +111,7 @@ async def invite_member(request: Request, response: Response, data: MembershipIn
         settings,
         recipient=str(data.email),
         subject="Tus credenciales temporales de EnterpriseCloud",
-        html=invitation_html(temporary_password=data.temporary_password, tenant_name=db.get(Tenant, actor.tenant_id).name, role=data.role_code),
+        html=invitation_html(email=str(data.email), temporary_password=data.temporary_password, tenant_name=db.get(Tenant, actor.tenant_id).name, role=data.role_code),
     )
     return membership
 

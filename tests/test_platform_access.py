@@ -68,4 +68,5 @@ async def test_platform_owner_credentials_are_sent_by_email(monkeypatch):
     assert delivered["recipient"] == "owner@example.com"
     assert delivered["subject"] == "Tus credenciales temporales de EnterpriseCloud"
     assert "Empresa de prueba" in delivered["html"]
+    assert "owner@example.com" in delivered["html"]
     assert "Temporal123!" in delivered["html"]

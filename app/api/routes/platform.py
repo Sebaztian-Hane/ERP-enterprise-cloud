@@ -66,6 +66,7 @@ async def send_platform_owner_credentials(
         recipient=owner_email,
         subject="Tus credenciales temporales de EnterpriseCloud",
         html=invitation_html(
+            email=owner_email,
             temporary_password=temporary_password,
             tenant_name=tenant_name,
             role="Propietario",
