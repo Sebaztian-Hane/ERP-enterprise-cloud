@@ -1,4 +1,4 @@
-from app.services.cpe_evidence import canonical_json_bytes, content_hash, redact_provider_data
+from app.services.cpe_evidence import _allowed_provider_url, canonical_json_bytes, content_hash, redact_provider_data
 
 
 def test_provider_evidence_hash_is_stable_and_tokens_are_redacted():
@@ -24,3 +24,13 @@ def test_cpe_evidence_migration_is_append_only_and_repairs_provider_statuses():
     assert "electronic_document_events" in migration
     assert "before update or delete" in migration
     assert "enable row level security" in migration
+
+
+def test_cpe_evidence_only_downloads_known_fiscal_hosts():
+    assert _allowed_provider_url("https://cdn.apisunat.com/cpe/document.xml").startswith("https://cdn.apisunat.com/")
+    try:
+        _allowed_provider_url("https://untrusted.example/document.xml")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("An untrusted evidence URL must never be fetched")
