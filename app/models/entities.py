@@ -323,6 +323,7 @@ class Sale(TimestampedTenantModel):
     payment_term_code: Mapped[str | None] = mapped_column(String(24))
     payment_term_name: Mapped[str | None] = mapped_column(String(120))
     payment_term_days_due: Mapped[int | None] = mapped_column()
+    payment_method: Mapped[str | None] = mapped_column(String(32))
     due_date: Mapped[date | None] = mapped_column()
     cost_center_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     cost_center_code: Mapped[str | None] = mapped_column(String(32))

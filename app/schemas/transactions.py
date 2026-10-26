@@ -76,6 +76,7 @@ class SaleCreate(BaseModel):
     warehouse_id: UUID
     price_list_id: UUID | None = None
     payment_term_id: UUID | None = None
+    payment_method: Literal["bank_transfer", "bank_deposit", "check", "corporate_card", "commercial_credit", "cash"] | None = None
     cost_center_id: UUID | None = None
     lines: list[SaleLineCreate] = Field(min_length=1)
     note: str | None = None
@@ -149,6 +150,7 @@ class SaleOut(ORMModel):
     payment_term_code: str | None
     payment_term_name: str | None
     payment_term_days_due: int | None
+    payment_method: str | None
     due_date: date | None
     cost_center_id: UUID | None
     cost_center_code: str | None

@@ -797,6 +797,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         payment_term_code=payment_term.code if payment_term else None,
         payment_term_name=payment_term.name if payment_term else None,
         payment_term_days_due=payment_term.days_due if payment_term else None,
+        payment_method=data.payment_method,
         due_date=due_date,
         cost_center_id=cost_center.id,
         cost_center_code=cost_center.code,
