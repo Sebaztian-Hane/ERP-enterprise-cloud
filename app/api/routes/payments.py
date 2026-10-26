@@ -40,7 +40,7 @@ def _active_tenant_cash_account(db: Session, *, cash_account_id: UUID, tenant_id
     """Do not let a tenant configure or collect into another tenant's account."""
     return bool(db.execute(
         __import__("sqlalchemy").text(
-            "select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true"
+            "select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true and currency='PEN'"
         ),
         {"id": str(cash_account_id), "tenant": str(tenant_id)},
     ).first())
@@ -92,7 +92,7 @@ def upsert_pos_payment_method(
     db: Session = Depends(get_db),
 ):
     if not _active_tenant_cash_account(db, cash_account_id=data.cash_account_id, tenant_id=actor.tenant_id):
-        raise HTTPException(status_code=404, detail="Cuenta de caja o banco no encontrada en la empresa activa")
+        raise HTTPException(status_code=404, detail="Selecciona una caja o banco activo en PEN de la empresa activa")
     config = db.scalar(
         select(PosPaymentMethodConfig)
         .where(

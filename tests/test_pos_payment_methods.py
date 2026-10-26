@@ -36,6 +36,12 @@ def test_pos_cash_account_lookup_is_scoped_to_the_active_tenant():
     assert "from cash_accounts where id=:id and tenant_id=:tenant and is_active=true" in source
 
 
+def test_pos_cash_account_lookup_requires_pen_for_pen_pos_sales():
+    source = Path("app/api/routes/payments.py").read_text(encoding="utf-8")
+
+    assert "currency='PEN'" in source
+
+
 def test_pos_method_read_authorizes_counter_staff_and_finance_without_granting_configuration_write():
     source = Path("app/api/routes/payments.py").read_text(encoding="utf-8")
 

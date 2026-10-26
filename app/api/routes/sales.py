@@ -63,7 +63,7 @@ def _pos_consumer_final_customer(db: Session, *, tenant_id: UUID) -> Customer:
 
 def _pos_cash_account_is_active(db: Session, *, cash_account_id: UUID, tenant_id: UUID) -> bool:
     return bool(db.execute(
-        text("select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true"),
+        text("select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true and currency='PEN'"),
         {"id": str(cash_account_id), "tenant": str(tenant_id)},
     ).first())
 
@@ -544,7 +544,7 @@ def post_pos_checkout(
         ).with_for_update()).all()
     }
     if set(configurations) != methods:
-        raise HTTPException(status_code=422, detail="Configura una caja o banco activo para cada medio de pago POS")
+        raise HTTPException(status_code=422, detail="Configura una caja o banco activo en PEN para cada medio de pago POS")
     if any(not _pos_cash_account_is_active(
         db, cash_account_id=config.cash_account_id, tenant_id=actor.tenant_id,
     ) for config in configurations.values()):
