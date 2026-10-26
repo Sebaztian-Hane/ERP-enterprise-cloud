@@ -686,7 +686,10 @@ def post_pos_checkout(
                 description=f"Cobro POS {ticket_number}",
                 source_type="payment",
                 source_id=payment.id,
-                lines=[("1010", tender.amount, Decimal("0")), ("1210", Decimal("0"), tender.amount)],
+                lines=[
+                    ("1010", tender.amount, Decimal("0"), cost_center.id),
+                    ("1210", Decimal("0"), tender.amount, cost_center.id),
+                ],
             )
             payment_numbers.append(payment_number)
         receivable.status = "paid" if receivable.balance_amount == 0 else "partial"

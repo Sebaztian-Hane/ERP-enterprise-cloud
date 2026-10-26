@@ -1,4 +1,5 @@
 from decimal import Decimal
+import inspect
 from pathlib import Path
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.routes.sales import _validate_pos_tender_total
+from app.api.routes.sales import post_pos_checkout
 from app.schemas.transactions import PosCheckoutCreate, PosTenderCreate
 
 
@@ -51,3 +53,11 @@ def test_pos_tenders_must_cover_the_server_calculated_total_exactly():
             total=Decimal("20.00"),
             tenders=[PosTenderCreate(method="cash", amount=Decimal("19.99"))],
         )
+
+
+def test_pos_payment_entry_carries_the_sale_cost_center():
+    """POS settlement must satisfy the non-null journal-line dimension."""
+    source = inspect.getsource(post_pos_checkout)
+
+    assert '("1010", tender.amount, Decimal("0"), cost_center.id)' in source
+    assert '("1210", Decimal("0"), tender.amount, cost_center.id)' in source
