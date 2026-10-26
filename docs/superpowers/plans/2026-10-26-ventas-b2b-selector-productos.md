@@ -28,19 +28,19 @@
 
 **Files:** `app/models/entities.py`, `app/schemas/transactions.py`, `app/api/routes/sales.py`, migración y `tests/test_document_payment_terms.py`.
 
-- [ ] Escribir y ejecutar una prueba roja para método permitido/no permitido.
-- [ ] Añadir campo, migración y asignación al crear la venta.
-- [ ] Ejecutar la prueba y la suite backend.
+- [x] Escribir y ejecutar una prueba roja para método permitido/no permitido.
+- [x] Añadir campo, migración y asignación al crear la venta.
+- [x] Ejecutar la prueba y la suite backend.
 
 ### Task 2: Formulario y modal de productos
 
 **Files:** `src/components/SalesPage.tsx`, `src/styles.css`.
 
-- [ ] Sustituir la alta automática de líneas por selección paginada.
-- [ ] Añadir método previsto al borrador y a la solicitud.
-- [ ] Confinar tabla y paginador dentro del modal.
+- [x] Sustituir la alta automática de líneas por selección paginada.
+- [x] Añadir método previsto al borrador y a la solicitud.
+- [x] Confinar tabla y paginador dentro del modal.
 
 ### Task 3: Verificación visual
 
-- [ ] Compilar frontend.
-- [ ] Validar en navegador la apertura, búsqueda, paginación y selección sin enviar una venta.
+- [x] Compilar frontend.
+- [x] Validar en navegador la apertura, búsqueda, paginación y selección sin enviar una venta.
