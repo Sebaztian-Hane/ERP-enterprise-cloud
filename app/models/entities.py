@@ -488,6 +488,23 @@ class Payment(TimestampedTenantModel):
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PosPaymentMethodConfig(TimestampedTenantModel):
+    """Maps a POS tender to a tenant-owned cash or bank account.
+
+    The cash-account table predates ORM mappings, so tenant ownership is
+    validated at the API boundary and reinforced by the migration's RLS policy.
+    """
+
+    __tablename__ = "pos_payment_method_configs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "method"),
+        Index("ix_pos_payment_methods_tenant_active", "tenant_id", "is_active"),
+    )
+    method: Mapped[str] = mapped_column(String(32), nullable=False)
+    cash_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class AccountReceivable(TimestampedTenantModel):
     __tablename__ = "accounts_receivable"
     __table_args__ = (UniqueConstraint("tenant_id", "sale_id"), Index("ix_ar_tenant_status", "tenant_id", "status"))

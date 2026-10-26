@@ -1,7 +1,33 @@
 from decimal import Decimal
 from uuid import UUID
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas.common import ORMModel
+
+
+POS_PAYMENT_METHODS = frozenset({"cash", "visa", "mastercard", "yape", "plin"})
+
+
+class PosPaymentMethodConfigUpsert(BaseModel):
+    """Tenant-owned settlement account for one POS tender type."""
+
+    method: str = Field(min_length=1, max_length=32)
+    cash_account_id: UUID
+    is_active: bool = True
+
+    @field_validator("method")
+    @classmethod
+    def supported_method(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in POS_PAYMENT_METHODS:
+            raise ValueError("Método de pago POS no compatible")
+        return normalized
+
+
+class PosPaymentMethodConfigOut(ORMModel):
+    id: UUID
+    method: str
+    cash_account_id: UUID
+    is_active: bool
 
 
 class PaymentAllocationCreate(BaseModel):

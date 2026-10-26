@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import AccountPayable, AccountReceivable, Customer, Payment, PaymentAllocation, Supplier
-from app.schemas.payments import PaymentCreate, PaymentOut
+from app.models.entities import AccountPayable, AccountReceivable, Customer, Payment, PaymentAllocation, PosPaymentMethodConfig, Supplier
+from app.schemas.payments import PaymentCreate, PaymentOut, PosPaymentMethodConfigOut, PosPaymentMethodConfigUpsert
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
@@ -16,6 +16,16 @@ from app.services.approval_documents import create_payment_evidence
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+def _active_tenant_cash_account(db: Session, *, cash_account_id: UUID, tenant_id: UUID) -> bool:
+    """Do not let a tenant configure or collect into another tenant's account."""
+    return bool(db.execute(
+        __import__("sqlalchemy").text(
+            "select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true"
+        ),
+        {"id": str(cash_account_id), "tenant": str(tenant_id)},
+    ).first())
 
 
 def _same_payment_request(existing: Payment, data: PaymentCreate) -> bool:
@@ -43,6 +53,61 @@ def list_payments(
     if not isinstance(page, int) and not isinstance(page_size, int):
         return db.scalars(statement).all()
     return paginate(db, statement, key="payments", page=page or 1, page_size=page_size or 25)
+
+
+@router.get("/pos-methods", response_model=list[PosPaymentMethodConfigOut])
+def list_pos_payment_methods(
+    actor: Actor = Depends(require_permission("payments:read")),
+    db: Session = Depends(get_db),
+):
+    return db.scalars(
+        select(PosPaymentMethodConfig)
+        .where(PosPaymentMethodConfig.tenant_id == actor.tenant_id)
+        .order_by(PosPaymentMethodConfig.method)
+    ).all()
+
+
+@router.put("/pos-methods", response_model=PosPaymentMethodConfigOut)
+def upsert_pos_payment_method(
+    data: PosPaymentMethodConfigUpsert,
+    actor: Actor = Depends(require_permission("payments:write")),
+    db: Session = Depends(get_db),
+):
+    if not _active_tenant_cash_account(db, cash_account_id=data.cash_account_id, tenant_id=actor.tenant_id):
+        raise HTTPException(status_code=404, detail="Cuenta de caja o banco no encontrada en la empresa activa")
+    config = db.scalar(
+        select(PosPaymentMethodConfig)
+        .where(
+            PosPaymentMethodConfig.tenant_id == actor.tenant_id,
+            PosPaymentMethodConfig.method == data.method,
+        )
+        .with_for_update()
+    )
+    if config is None:
+        config = PosPaymentMethodConfig(tenant_id=actor.tenant_id, **data.model_dump())
+        db.add(config)
+        action = "create"
+    else:
+        config.cash_account_id = data.cash_account_id
+        config.is_active = data.is_active
+        action = "update"
+    try:
+        db.flush()
+        record(
+            db,
+            tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+            action=action,
+            module="payments",
+            entity="pos_payment_method",
+            entity_id=config.id,
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="No se pudo guardar el método de pago POS") from exc
+    db.refresh(config)
+    return config
 
 
 @router.post("", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
@@ -73,7 +138,7 @@ def create_payment(request: Request, response: Response, data: PaymentCreate, ac
         raise HTTPException(status_code=404, detail="Cliente no encontrado en la empresa activa")
     if data.supplier_id and not db.scalar(select(Supplier.id).where(Supplier.id == data.supplier_id, Supplier.tenant_id == actor.tenant_id, Supplier.is_active.is_(True))):
         raise HTTPException(status_code=404, detail="Proveedor no encontrado en la empresa activa")
-    if not db.execute(__import__("sqlalchemy").text("select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true"), {"id":str(data.cash_account_id),"tenant":str(actor.tenant_id)}).first():
+    if not _active_tenant_cash_account(db, cash_account_id=data.cash_account_id, tenant_id=actor.tenant_id):
         raise HTTPException(status_code=404, detail="Cuenta de caja o banco no encontrada")
     payment_data = data.model_dump(exclude={"allocations"})
     payment = Payment(tenant_id=actor.tenant_id, status="submitted" if data.payment_type == "payment" else "posted", requested_by=actor.user_id if data.payment_type == "payment" else None, **payment_data)
