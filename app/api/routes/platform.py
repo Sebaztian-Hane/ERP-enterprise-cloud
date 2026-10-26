@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.entities import EntityAPISunatCredential, LegalEntity, MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting
 from app.schemas.common import APISunatCredentialStatus, APISunatCredentialUpsert, ModuleToggle, PlatformTenantCreate, PlatformTenantOut, PlatformTenantUpdate
@@ -19,6 +20,7 @@ from app.security.auth import PlatformActor, require_platform_admin
 from app.services.audit import record
 from app.services.supabase_admin import create_user
 from app.services.apisunat_credentials import encrypt_persona_token
+from app.services.decolecta import DecolectaError, lookup_tax_id
 
 
 router = APIRouter(prefix="/platform", tags=["platform"])
@@ -48,6 +50,24 @@ def tenant_payload(tenant: Tenant, active_members: int) -> PlatformTenantOut:
         created_at=tenant.created_at,
         active_members=active_members,
     )
+
+
+@router.get("/tenant-ruc-lookup/{tax_id}")
+@limiter.limit("30/minute")
+def lookup_platform_tenant_ruc(
+    request: Request,
+    response: Response,
+    tax_id: str,
+    actor: PlatformActor = Depends(require_platform_admin),
+):
+    """Prefill a new tenant's issuer details without exposing DeColecta to browsers."""
+    normalized = tax_id.strip()
+    if not normalized.isdigit() or len(normalized) != 11:
+        raise HTTPException(status_code=422, detail="El RUC emisor debe tener 11 dígitos")
+    try:
+        return lookup_tax_id(get_settings(), normalized)
+    except DecolectaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/tenants", response_model=list[PlatformTenantOut])
