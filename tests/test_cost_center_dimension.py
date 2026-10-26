@@ -39,3 +39,11 @@ def test_document_models_resolve_every_declared_foreign_key_target():
                 unresolved_targets.append(f"{table.name}.{foreign_key.parent.name}->{target_table}")
 
     assert unresolved_targets == []
+
+
+def test_direct_sales_do_not_bind_an_untyped_null_order_reservation_parameter():
+    """PostgreSQL must never receive ``:own_order is null`` without a UUID."""
+    source = inspect.getsource(post_sale)
+
+    assert ":own_order is null" not in source
+    assert "if own_order_id:" in source

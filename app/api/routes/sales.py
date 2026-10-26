@@ -525,12 +525,21 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
                     Inventory.product_id == line.product_id,
                     Inventory.warehouse_id == data.warehouse_id,
                 ).with_for_update())
+                reservation_filter = ""
+                reservation_params = {
+                    "tenant": str(actor.tenant_id),
+                    "product": str(line.product_id),
+                    "warehouse": str(data.warehouse_id),
+                }
+                if own_order_id:
+                    reservation_filter = """
+                      and not (reference_type='sales_order' and reference_id=:own_order)
+                    """
+                    reservation_params["own_order"] = str(own_order_id)
                 reserved = db.execute(text("""
                     select coalesce(sum(quantity),0) from stock_reservations
                     where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'
-                      and (:own_order is null or not (reference_type='sales_order' and reference_id=:own_order))
-                """), {"tenant": str(actor.tenant_id), "product": str(line.product_id),
-                           "warehouse": str(data.warehouse_id), "own_order": str(own_order_id) if own_order_id else None}).scalar() or Decimal("0")
+                """ + reservation_filter), reservation_params).scalar() or Decimal("0")
                 if stock is None or Decimal(str(stock.quantity)) - Decimal(str(reserved)) < line.quantity:
                     raise HTTPException(status_code=422, detail="No hay stock disponible suficiente; parte de las existencias está reservada")
         for line in data.lines:
