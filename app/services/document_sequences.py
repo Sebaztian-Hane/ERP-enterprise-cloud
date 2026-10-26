@@ -40,6 +40,21 @@ def allocate_document_number(
         raise ValueError("La entidad legal y la sucursal deben definirse juntas")
 
     scoped = legal_entity_id is not None
+    conflict_columns = (
+        [
+            DocumentSequence.tenant_id,
+            DocumentSequence.legal_entity_id,
+            DocumentSequence.branch_id,
+            DocumentSequence.module,
+            DocumentSequence.document_type,
+        ]
+        if scoped
+        else [
+            DocumentSequence.tenant_id,
+            DocumentSequence.module,
+            DocumentSequence.document_type,
+        ]
+    )
     conflict_where = (
         (DocumentSequence.legal_entity_id.is_not(None)) & (DocumentSequence.branch_id.is_not(None))
         if scoped
@@ -56,13 +71,7 @@ def allocate_document_number(
         "is_active": True,
     }
     db.execute(insert(DocumentSequence).values(**values).on_conflict_do_nothing(
-        index_elements=[
-            DocumentSequence.tenant_id,
-            DocumentSequence.legal_entity_id,
-            DocumentSequence.branch_id,
-            DocumentSequence.module,
-            DocumentSequence.document_type,
-        ],
+        index_elements=conflict_columns,
         index_where=conflict_where,
     ))
     sequence = db.scalar(select(DocumentSequence).where(

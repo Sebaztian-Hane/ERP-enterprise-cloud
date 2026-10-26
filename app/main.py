@@ -50,19 +50,6 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
-    # The API only exposes read, create and partial-update endpoints.  Keeping
-    # this list explicit prevents browsers from preflighting unused verbs.
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    # Browser clients must be allowed to send the replay key on cross-origin
-    # POST requests. Omitting it makes the browser reject the preflight before
-    # any command reaches the idempotency layer.
-    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "Idempotency-Key"],
-)
-app.include_router(api_router)
 
 @app.middleware("http")
 async def request_trace(request: Request, call_next):
@@ -83,6 +70,24 @@ async def request_trace(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     logging.info("request method=%s path=%s status=%s", request.method, request.url.path, response.status_code)
     return response
+
+
+# Register CORS after the trace middleware so it is outermost.  This keeps the
+# allow-origin header on JSON error responses produced by request_trace; without
+# it browsers hide a useful API error behind a misleading CORS failure.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    # The API only exposes read, create and partial-update endpoints.  Keeping
+    # this list explicit prevents browsers from preflighting unused verbs.
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    # Browser clients must be allowed to send the replay key on cross-origin
+    # POST requests. Omitting it makes the browser reject the preflight before
+    # any command reaches the idempotency layer.
+    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "Idempotency-Key"],
+)
+app.include_router(api_router)
 
 
 @app.get("/health", tags=["system"])
