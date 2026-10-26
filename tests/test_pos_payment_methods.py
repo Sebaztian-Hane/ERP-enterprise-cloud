@@ -36,7 +36,9 @@ def test_pos_cash_account_lookup_is_scoped_to_the_active_tenant():
     assert "from cash_accounts where id=:id and tenant_id=:tenant and is_active=true" in source
 
 
-def test_counter_staff_can_read_active_pos_tenders_without_finance_access():
+def test_pos_method_read_authorizes_counter_staff_and_finance_without_granting_configuration_write():
     source = Path("app/api/routes/payments.py").read_text(encoding="utf-8")
 
-    assert 'require_permission("sales:read", module_code="pos")' in source
+    assert "def require_pos_methods_read" in source
+    assert '"sales:read" not in granted and "payments:read" not in granted' in source
+    assert 'require_permission("payments:write")' in source

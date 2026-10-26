@@ -9,13 +9,31 @@ from app.db.session import get_db
 from app.models.entities import AccountPayable, AccountReceivable, Customer, Payment, PaymentAllocation, PosPaymentMethodConfig, Supplier
 from app.schemas.payments import PaymentCreate, PaymentOut, PosPaymentMethodConfigOut, PosPaymentMethodConfigUpsert
 from app.schemas.pagination import paginate
-from app.security.auth import Actor, require_permission, require_second_factor
+from app.security.auth import Actor, ROLE_PERMISSIONS, get_actor, module_is_enabled, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.accounting import post_entry
 from app.services.approval_documents import create_payment_evidence
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+def require_pos_methods_read(
+    actor: Actor = Depends(get_actor),
+    db: Session = Depends(get_db),
+) -> Actor:
+    """Let POS cashiers read tenders while Finance configures them.
+
+    Reading the tender catalog is needed before a sales-only cashier can open
+    the counter. Finance must also be able to review its configuration from
+    Tesorería, but only `payments:write` may change it.
+    """
+    granted = ROLE_PERMISSIONS.get(actor.role_code, set())
+    if "*" not in granted and "sales:read" not in granted and "payments:read" not in granted:
+        raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
+    if "*" not in granted and "payments:read" not in granted and not module_is_enabled(db, actor, "pos"):
+        raise HTTPException(status_code=403, detail="Este módulo no está habilitado para su acceso")
+    return actor
 
 
 def _active_tenant_cash_account(db: Session, *, cash_account_id: UUID, tenant_id: UUID) -> bool:
@@ -57,7 +75,7 @@ def list_payments(
 
 @router.get("/pos-methods", response_model=list[PosPaymentMethodConfigOut])
 def list_pos_payment_methods(
-    actor: Actor = Depends(require_permission("sales:read", module_code="pos")),
+    actor: Actor = Depends(require_pos_methods_read),
     db: Session = Depends(get_db),
 ):
     return db.scalars(
