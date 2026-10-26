@@ -57,7 +57,7 @@ def list_payments(
 
 @router.get("/pos-methods", response_model=list[PosPaymentMethodConfigOut])
 def list_pos_payment_methods(
-    actor: Actor = Depends(require_permission("payments:read")),
+    actor: Actor = Depends(require_permission("sales:read", module_code="pos")),
     db: Session = Depends(get_db),
 ):
     return db.scalars(
