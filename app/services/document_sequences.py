@@ -19,6 +19,7 @@ from app.models.entities import DocumentSequence
 DEFAULT_PREFIXES = {
     ("sales", "sale"): "V",
     ("purchases", "purchase"): "C",
+    ("pos", "ticket"): "PV",
 }
 
 

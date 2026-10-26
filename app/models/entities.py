@@ -505,6 +505,23 @@ class PosPaymentMethodConfig(TimestampedTenantModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class PosReceipt(TimestampedTenantModel):
+    """Internal POS receipt, distinct from fiscal CPE and delivery guides."""
+
+    __tablename__ = "pos_receipts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "sale_id"),
+        UniqueConstraint("tenant_id", "ticket_number"),
+        Index("ix_pos_receipts_tenant_created", "tenant_id", "created_at"),
+    )
+    sale_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sales.id"), nullable=False)
+    ticket_number: Mapped[str] = mapped_column(String(40), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    customer_identified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    tender_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    electronic_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("electronic_documents.id"))
+
+
 class AccountReceivable(TimestampedTenantModel):
     __tablename__ = "accounts_receivable"
     __table_args__ = (UniqueConstraint("tenant_id", "sale_id"), Index("ix_ar_tenant_status", "tenant_id", "status"))

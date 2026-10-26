@@ -80,7 +80,7 @@ def amount_in_words(amount: Decimal) -> str:
     return f"{words} CON {cents:02d}/100 SOLES"
 
 
-def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, document_type: str, series: str, correlative: str, issuer: dict[str, str], customer: dict[str, str], lines: list[dict[str, Any]], total: Decimal, tax_rate_percent: Decimal = Decimal("18")) -> dict[str, Any]:
+def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, document_type: str, series: str, correlative: str, issuer: dict[str, str], customer: dict[str, str] | None, lines: list[dict[str, Any]], total: Decimal, tax_rate_percent: Decimal = Decimal("18")) -> dict[str, Any]:
     tax_rate_percent = Decimal(tax_rate_percent)
     tax_multiplier = Decimal("1") + tax_rate_percent / Decimal("100")
     taxable_total = Decimal("0")
@@ -123,20 +123,22 @@ def build_document_body(*, sale_number: str, issue_date: str, issue_time: str, d
             },
         })
     taxable_total, tax_total, total = _money(taxable_total), _money(tax_total), _money(total)
-    customer_scheme = "6" if document_type == "01" else ("1" if len(customer["tax_id"]) == 8 else "6")
-    return {
+    document = {
         "cbc:UBLVersionID": {"_text": "2.1"}, "cbc:CustomizationID": {"_text": "2.0"},
         "cbc:ID": {"_text": f"{series}-{correlative}"}, "cbc:IssueDate": {"_text": issue_date}, "cbc:IssueTime": {"_text": issue_time},
         "cbc:InvoiceTypeCode": {"_attributes": {"listID": "0101"}, "_text": document_type},
         "cbc:Note": [{"_text": amount_in_words(total), "_attributes": {"languageLocaleID": "1000"}}],
         "cbc:DocumentCurrencyCode": {"_text": "PEN"},
         "cac:AccountingSupplierParty": {"cac:Party": {"cac:PartyIdentification": {"cbc:ID": {"_attributes": {"schemeID": "6"}, "_text": issuer["ruc"]}}, "cac:PartyName": {"cbc:Name": {"_text": issuer["trade_name"]}}, "cac:PartyLegalEntity": {"cbc:RegistrationName": {"_text": issuer["legal_name"]}, "cac:RegistrationAddress": {"cbc:AddressTypeCode": {"_text": "0000"}, "cac:AddressLine": {"cbc:Line": {"_text": issuer["address"]}}}}}},
-        "cac:AccountingCustomerParty": {"cac:Party": {"cac:PartyIdentification": {"cbc:ID": {"_attributes": {"schemeID": customer_scheme}, "_text": customer["tax_id"]}}, "cac:PartyLegalEntity": {"cbc:RegistrationName": {"_text": customer["name"]}, "cac:RegistrationAddress": {"cac:AddressLine": {"cbc:Line": {"_text": customer["address"] or "-"}}}}}},
         "cac:TaxTotal": {"cbc:TaxAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(tax_total)}, "cac:TaxSubtotal": [{"cbc:TaxableAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(taxable_total)}, "cbc:TaxAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(tax_total)}, "cac:TaxCategory": {"cac:TaxScheme": {"cbc:ID": {"_text": "1000"}, "cbc:Name": {"_text": "IGV"}, "cbc:TaxTypeCode": {"_text": "VAT"}}}}]},
         "cac:LegalMonetaryTotal": {"cbc:LineExtensionAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(taxable_total)}, "cbc:TaxInclusiveAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(total)}, "cbc:PayableAmount": {"_attributes": {"currencyID": "PEN"}, "_text": float(total)}},
         "cac:PaymentTerms": [{"cbc:ID": {"_text": "FormaPago"}, "cbc:PaymentMeansID": {"_text": "Contado"}}],
         "cac:InvoiceLine": invoice_lines,
     }
+    if customer is not None:
+        customer_scheme = "6" if document_type == "01" else ("1" if len(customer["tax_id"]) == 8 else "6")
+        document["cac:AccountingCustomerParty"] = {"cac:Party": {"cac:PartyIdentification": {"cbc:ID": {"_attributes": {"schemeID": customer_scheme}, "_text": customer["tax_id"]}}, "cac:PartyLegalEntity": {"cbc:RegistrationName": {"_text": customer["name"]}, "cac:RegistrationAddress": {"cac:AddressLine": {"cbc:Line": {"_text": customer["address"] or "-"}}}}}}
+    return document
 
 
 def _post(settings: Settings, path: str, payload: dict[str, Any]) -> dict[str, Any]:

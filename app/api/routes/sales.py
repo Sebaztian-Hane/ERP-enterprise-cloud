@@ -7,9 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
-from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, ElectronicDocumentArtifact, ElectronicDocumentEvent, Inventory, LegalEntity, Product, Sale, SaleItem, Warehouse
+from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, ElectronicDocumentArtifact, ElectronicDocumentEvent, Inventory, LegalEntity, Payment, PaymentAllocation, PosPaymentMethodConfig, PosReceipt, Product, Sale, SaleItem, Warehouse
 from app.schemas.electronic_billing import ElectronicArtifactDownloadOut, ElectronicDocumentArtifactOut, ElectronicDocumentCreate, ElectronicDocumentEventOut, ElectronicDocumentOut, ElectronicDocumentTraceOut, VoidElectronicDocument
-from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PriceListQuoteCreate, SaleCreate, SaleOut
+from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PosCheckoutCreate, PosTenderCreate, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission, require_second_factor
 from app.services.audit import record
@@ -27,9 +27,45 @@ from app.services.taxes import resolve_default_tax_rate
 from app.services.cost_centers import resolve_cost_center
 from app.services.apisunat_credentials import resolve_apisunat_credentials
 from app.services.cpe_evidence import capture_provider_evidence, record_cpe_event
+from app.services.pos_fiscal import cpe_customer_payload, validate_administrative_sale_customer, validate_pos_fiscal_selection
 from app.storage.supabase import signed_url
 
 router = APIRouter(prefix="/sales", tags=["sales"])
+
+
+def _validate_pos_tender_total(*, total: Decimal, tenders: list[PosTenderCreate]) -> Decimal:
+    tender_total = sum((tender.amount for tender in tenders), Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    expected = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if tender_total != expected:
+        raise HTTPException(status_code=422, detail="La suma de medios de pago debe coincidir con el total de la venta")
+    return tender_total
+
+
+def _pos_consumer_final_customer(db: Session, *, tenant_id: UUID) -> Customer:
+    """Return the one tenant-owned anonymous counterparty; never invent a DNI."""
+    customer = db.scalar(select(Customer).where(
+        Customer.tenant_id == tenant_id,
+        Customer.code == "POS-CONSUMIDOR-FINAL",
+    ).with_for_update())
+    if customer is None:
+        customer = Customer(
+            tenant_id=tenant_id,
+            code="POS-CONSUMIDOR-FINAL",
+            name="Consumidor final",
+            tax_id=None,
+        )
+        db.add(customer)
+        db.flush()
+    if not customer.is_active:
+        raise HTTPException(status_code=409, detail="El cliente Consumidor final POS está inactivo")
+    return customer
+
+
+def _pos_cash_account_is_active(db: Session, *, cash_account_id: UUID, tenant_id: UUID) -> bool:
+    return bool(db.execute(
+        text("select 1 from cash_accounts where id=:id and tenant_id=:tenant and is_active=true"),
+        {"id": str(cash_account_id), "tenant": str(tenant_id)},
+    ).first())
 
 
 def _resolve_price_list_prices(
@@ -258,11 +294,18 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     items = db.execute(select(SaleItem, Product).join(Product, Product.id == SaleItem.product_id).where(SaleItem.sale_id == sale.id, SaleItem.tenant_id == actor.tenant_id)).all()
     if not customer or not items:
         raise HTTPException(status_code=409, detail="La venta no tiene cliente o líneas válidas para facturar")
-    tax_id = (customer.tax_id or "").strip()
-    if data.document_type == "01" and (len(tax_id) != 11 or not tax_id.isdigit()):
-        raise HTTPException(status_code=422, detail="Para emitir Factura el cliente debe tener un RUC de 11 dígitos")
-    if data.document_type == "03" and (len(tax_id) not in {8, 11} or not tax_id.isdigit()):
-        raise HTTPException(status_code=422, detail="Para emitir Boleta el cliente debe tener DNI de 8 dígitos o RUC de 11 dígitos")
+    pos_receipt = db.scalar(select(PosReceipt).where(
+        PosReceipt.sale_id == sale.id,
+        PosReceipt.tenant_id == actor.tenant_id,
+    ))
+    customer_payload = cpe_customer_payload(
+        total=sale.total,
+        document_type=data.document_type,
+        is_pos_receipt=pos_receipt is not None,
+        customer_tax_id=customer.tax_id,
+        customer_name=customer.name,
+        customer_address="",
+    )
     series = credentials.invoice_series if data.document_type == "01" else credentials.receipt_series
     try:
         correlative = next_correlative(
@@ -291,7 +334,7 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
             "legal_name": legal_entity.legal_name,
             "address": branch.address or legal_entity.fiscal_address,
         },
-        customer={"tax_id": tax_id, "name": customer.name, "address": ""},
+        customer=customer_payload,
         lines=[{"quantity": item.quantity, "unit_price": item.unit_price, "unit": product.unit_code, "description": product.name} for item, product in items],
         total=sale.total,
         tax_rate_percent=tax_rate_percent,
@@ -321,6 +364,8 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
         },
     )
     db.add(document)
+    if pos_receipt is not None:
+        pos_receipt.document_type = data.document_type
     try:
         db.flush()
         record_cpe_event(
@@ -413,6 +458,263 @@ def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: 
     return document
 
 
+@router.post("/pos-checkout", status_code=status.HTTP_201_CREATED)
+def post_pos_checkout(
+    request: Request,
+    data: PosCheckoutCreate,
+    actor: Actor = Depends(require_permission("sales:write", module_code="pos")),
+    db: Session = Depends(get_db),
+):
+    """Post a retail checkout, its internal receipt and settled tender rows.
+
+    Sale, stock issue, receivable, payment allocations, cash movements and the
+    internal receipt share one database transaction.  The fiscal CPE remains a
+    separately reserved asynchronous document so a provider outage cannot
+    leave a cashier with an ambiguous paid sale.
+    """
+    idempotency = claim_idempotency(
+        db,
+        tenant_id=actor.tenant_id,
+        actor_user_id=actor.user_id,
+        operation="sales.pos_checkout",
+        key=request.headers.get("Idempotency-Key"),
+        payload=data.model_dump(mode="json"),
+    )
+    if idempotency and idempotency.is_replay:
+        return replay_response(idempotency)
+
+    if data.customer is not None:
+        customer = db.scalar(select(Customer).where(
+            Customer.tenant_id == actor.tenant_id,
+            Customer.tax_id == data.customer.tax_id,
+        ).with_for_update())
+        if customer is None:
+            customer = Customer(
+                tenant_id=actor.tenant_id,
+                code=f"CLI-{data.customer.tax_id}",
+                name=data.customer.name.strip(),
+                tax_id=data.customer.tax_id,
+                email=data.customer.email or None,
+                phone=data.customer.phone or None,
+            )
+            db.add(customer)
+            db.flush()
+            record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_from_pos", module="customers", entity="customer", entity_id=customer.id, detail=f"Cliente creado durante POS: {data.customer.tax_id}")
+        elif not customer.is_active:
+            raise HTTPException(status_code=409, detail="El cliente asociado a este comprobante está inactivo")
+    elif data.customer_id is not None:
+        customer = db.scalar(select(Customer).where(
+            Customer.id == data.customer_id,
+            Customer.tenant_id == actor.tenant_id,
+            Customer.is_active.is_(True),
+        ))
+        if customer is None:
+            raise HTTPException(status_code=404, detail="Cliente no encontrado en la empresa activa")
+    else:
+        customer = _pos_consumer_final_customer(db, tenant_id=actor.tenant_id)
+
+    operational_context = resolve_warehouse_context(
+        db, tenant_id=actor.tenant_id, warehouse_id=data.warehouse_id,
+    )
+    product_ids = {line.product_id for line in data.lines}
+    products_by_id = {product.id: product for product in db.scalars(select(Product).where(
+        Product.tenant_id == actor.tenant_id,
+        Product.id.in_(product_ids),
+        Product.is_active.is_(True),
+    ).with_for_update()).all()}
+    if set(products_by_id) != product_ids:
+        raise HTTPException(status_code=404, detail="Uno o más productos no pertenecen a la empresa activa")
+
+    total = sum((line.quantity * products_by_id[line.product_id].sale_price for line in data.lines), Decimal("0"))
+    total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tender_total = _validate_pos_tender_total(total=total, tenders=data.tenders)
+    validate_pos_fiscal_selection(
+        total=total,
+        document_type=data.document_type,
+        customer_tax_id=customer.tax_id,
+    )
+
+    methods = {tender.method for tender in data.tenders}
+    configurations = {
+        config.method: config
+        for config in db.scalars(select(PosPaymentMethodConfig).where(
+            PosPaymentMethodConfig.tenant_id == actor.tenant_id,
+            PosPaymentMethodConfig.method.in_(methods),
+            PosPaymentMethodConfig.is_active.is_(True),
+        ).with_for_update()).all()
+    }
+    if set(configurations) != methods:
+        raise HTTPException(status_code=422, detail="Configura una caja o banco activo para cada medio de pago POS")
+    if any(not _pos_cash_account_is_active(
+        db, cash_account_id=config.cash_account_id, tenant_id=actor.tenant_id,
+    ) for config in configurations.values()):
+        raise HTTPException(status_code=422, detail="Una cuenta configurada para POS ya no está activa en la empresa")
+
+    document_date = datetime.now(timezone.utc).date()
+    tax_rate = resolve_default_tax_rate(db, tenant_id=actor.tenant_id, document_date=document_date)
+    taxable_amount, tax_amount = split_tax(total, tax_rate.rate)
+    cost_center = resolve_cost_center(db, tenant_id=actor.tenant_id, cost_center_id=None)
+    sale_number = allocate_document_number(
+        db, tenant_id=actor.tenant_id, module="sales", document_type="sale",
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
+    )
+    ticket_number = allocate_document_number(
+        db, tenant_id=actor.tenant_id, module="pos", document_type="ticket",
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
+    )
+    sale = Sale(
+        tenant_id=actor.tenant_id,
+        number=sale_number,
+        customer_id=customer.id,
+        warehouse_id=data.warehouse_id,
+        due_date=document_date,
+        cost_center_id=cost_center.id,
+        cost_center_code=cost_center.code,
+        cost_center_name=cost_center.name,
+        tax_rate_id=tax_rate.id,
+        tax_rate_code=tax_rate.code,
+        tax_rate_name=tax_rate.name,
+        tax_rate_percent=tax_rate.rate,
+        taxable_amount=taxable_amount,
+        tax_amount=tax_amount,
+        legal_entity_id=operational_context.legal_entity.id if operational_context.legal_entity else None,
+        branch_id=operational_context.branch.id if operational_context.branch else None,
+        status="posted",
+        total=total,
+        note=data.note,
+    )
+    db.add(sale)
+    try:
+        db.flush()
+        receivable = AccountReceivable(
+            tenant_id=actor.tenant_id,
+            sale_id=sale.id,
+            customer_id=customer.id,
+            original_amount=total,
+            balance_amount=total,
+            status="open",
+            due_date=document_date,
+        )
+        db.add(receivable)
+        db.flush()
+        for line in sorted(data.lines, key=lambda item: str(item.product_id)):
+            stock = db.scalar(select(Inventory).where(
+                Inventory.tenant_id == actor.tenant_id,
+                Inventory.product_id == line.product_id,
+                Inventory.warehouse_id == data.warehouse_id,
+            ).with_for_update())
+            reserved = db.execute(text("""
+                select coalesce(sum(quantity),0) from stock_reservations
+                where tenant_id=:tenant and product_id=:product and warehouse_id=:warehouse and status='active'
+            """), {"tenant": str(actor.tenant_id), "product": str(line.product_id), "warehouse": str(data.warehouse_id)}).scalar() or Decimal("0")
+            if stock is None or Decimal(str(stock.quantity)) - Decimal(str(reserved)) < line.quantity:
+                raise HTTPException(status_code=422, detail="No hay stock disponible suficiente; parte de las existencias está reservada")
+        for line in data.lines:
+            product = products_by_id[line.product_id]
+            line_total = (line.quantity * product.sale_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            db.add(SaleItem(
+                tenant_id=actor.tenant_id,
+                sale_id=sale.id,
+                product_id=product.id,
+                quantity=line.quantity,
+                unit_price=product.sale_price,
+                line_total=line_total,
+            ))
+            issue_tracked_stock(
+                db,
+                tenant_id=actor.tenant_id,
+                product=product,
+                warehouse_id=data.warehouse_id,
+                quantity=line.quantity,
+                reference=sale_number,
+                serial_numbers=line.serial_numbers,
+            )
+        db.add(PosReceipt(
+            tenant_id=actor.tenant_id,
+            sale_id=sale.id,
+            ticket_number=ticket_number,
+            document_type=data.document_type,
+            customer_identified=bool(customer.tax_id),
+            tender_total=tender_total,
+        ))
+        post_entry(
+            db,
+            tenant_id=actor.tenant_id,
+            actor_id=actor.user_id,
+            number=f"AS-{sale_number}",
+            description=f"Venta POS {sale_number}",
+            source_type="sale",
+            source_id=sale.id,
+            lines=[("1210", total, Decimal("0"), cost_center.id), ("7010", Decimal("0"), taxable_amount, cost_center.id), ("4010", Decimal("0"), tax_amount, cost_center.id)],
+        )
+        payment_numbers: list[str] = []
+        for index, tender in enumerate(data.tenders, start=1):
+            config = configurations[tender.method]
+            payment_number = f"{ticket_number}-{index}"
+            payment = Payment(
+                tenant_id=actor.tenant_id,
+                number=payment_number,
+                payment_type="receipt",
+                cash_account_id=config.cash_account_id,
+                customer_id=customer.id,
+                amount=tender.amount,
+                method=tender.method,
+                reference=tender.reference or None,
+                note=f"Cobro POS {ticket_number}",
+                status="posted",
+            )
+            db.add(payment)
+            db.flush()
+            receivable.balance_amount -= tender.amount
+            db.add(PaymentAllocation(
+                tenant_id=actor.tenant_id,
+                payment_id=payment.id,
+                receivable_id=receivable.id,
+                amount=tender.amount,
+            ))
+            db.execute(text("""
+                insert into cash_movements(tenant_id,cash_account_id,payment_id,movement_type,amount,reference)
+                values(:tenant,:account,:payment,'inflow',:amount,:reference)
+            """), {"tenant": str(actor.tenant_id), "account": str(config.cash_account_id), "payment": str(payment.id), "amount": tender.amount, "reference": payment_number})
+            post_entry(
+                db,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
+                number=f"AS-{payment_number}",
+                description=f"Cobro POS {ticket_number}",
+                source_type="payment",
+                source_id=payment.id,
+                lines=[("1010", tender.amount, Decimal("0")), ("1210", Decimal("0"), tender.amount)],
+            )
+            payment_numbers.append(payment_number)
+        receivable.status = "paid" if receivable.balance_amount == 0 else "partial"
+        record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="post_pos", module="pos", entity="sale", entity_id=sale.id, detail=ticket_number)
+        response_body = {
+            "sale_id": str(sale.id),
+            "sale_number": sale.number,
+            "ticket_number": ticket_number,
+            "document_type": data.document_type,
+            "customer_id": str(customer.id),
+            "customer_identified": bool(customer.tax_id),
+            "total": total,
+            "tender_total": tender_total,
+            "balance_amount": Decimal("0.00"),
+            "payment_numbers": payment_numbers,
+            "electronic_document_status": "not_requested" if data.document_type == "ticket" else "pending_reservation",
+        }
+        complete_idempotency(db, claim=idempotency, response_body=response_body, response_status=status.HTTP_201_CREATED)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="No se pudo completar el cobro POS; vuelve a intentarlo con la misma clave") from exc
+    return response_body
+
+
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
 def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
@@ -445,7 +747,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
             db.flush()
             customer_id = customer.id
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="create_from_sale", module="customers", entity="customer", entity_id=customer.id, detail=f"Cliente creado durante venta: {data.customer.tax_id}")
-    customer = db.scalar(select(Customer.id).where(Customer.id == customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True)))
+    customer = db.scalar(select(Customer).where(Customer.id == customer_id, Customer.tenant_id == actor.tenant_id, Customer.is_active.is_(True)))
     operational_context = resolve_warehouse_context(
         db, tenant_id=actor.tenant_id, warehouse_id=data.warehouse_id,
     )
@@ -453,6 +755,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     products = set(db.scalars(select(Product.id).where(Product.tenant_id == actor.tenant_id, Product.id.in_(product_ids), Product.is_active.is_(True))).all())
     if not customer or products != product_ids:
         raise HTTPException(status_code=404, detail="Cliente, almacén o producto no pertenece a la empresa activa")
+    validate_administrative_sale_customer(customer_tax_id=customer.tax_id)
     resolved_prices = (
         _resolve_price_list_prices(
             db, tenant_id=actor.tenant_id, price_list_id=data.price_list_id, lines=data.lines,
@@ -484,7 +787,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
         branch_id=operational_context.branch.id if operational_context.branch else None,
     )
     sale = Sale(
-        tenant_id=actor.tenant_id, number=number, customer_id=customer_id,
+        tenant_id=actor.tenant_id, number=number, customer_id=customer.id,
         warehouse_id=data.warehouse_id,
         price_list_id=data.price_list_id,
         payment_term_id=payment_term.id if payment_term else None,
@@ -508,7 +811,7 @@ def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require
     db.add(sale)
     try:
         db.flush()
-        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer_id, original_amount=total, balance_amount=total, status="open", due_date=due_date))
+        db.add(AccountReceivable(tenant_id=actor.tenant_id, sale_id=sale.id, customer_id=customer.id, original_amount=total, balance_amount=total, status="open", due_date=due_date))
         products_by_id = {product.id: product for product in db.scalars(select(Product).where(
             Product.tenant_id == actor.tenant_id,
             Product.id.in_(product_ids),

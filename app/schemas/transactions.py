@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 from app.schemas.common import ORMModel
 
@@ -86,6 +87,55 @@ class SaleCreate(BaseModel):
             raise ValueError("Un producto solo puede aparecer una vez")
         if (self.customer_id is None) == (self.customer is None):
             raise ValueError("Selecciona un cliente existente o registra un cliente con DNI/RUC")
+        return self
+
+
+class PosCheckoutLineCreate(BaseModel):
+    """A cashier can choose quantity, never an authoritative unit price."""
+
+    product_id: UUID
+    quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
+    serial_numbers: list[str] | None = Field(default=None, max_length=100)
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_whole(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("La cantidad debe ser un número entero")
+        return value
+
+    @field_validator("serial_numbers")
+    @classmethod
+    def serial_numbers_must_be_unique(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return values
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("Las series de una línea deben ser únicas")
+        return normalized
+
+
+class PosTenderCreate(BaseModel):
+    method: Literal["cash", "visa", "mastercard", "yape", "plin"]
+    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    reference: str | None = Field(default=None, max_length=100)
+
+
+class PosCheckoutCreate(BaseModel):
+    warehouse_id: UUID
+    customer_id: UUID | None = None
+    customer: SaleCustomerCreate | None = None
+    document_type: Literal["ticket", "01", "03"] = "ticket"
+    lines: list[PosCheckoutLineCreate] = Field(min_length=1)
+    tenders: list[PosTenderCreate] = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def unique_products_and_single_customer_source(self):
+        if len({line.product_id for line in self.lines}) != len(self.lines):
+            raise ValueError("Un producto solo puede aparecer una vez")
+        if self.customer_id is not None and self.customer is not None:
+            raise ValueError("Selecciona un cliente existente o registra uno nuevo, no ambos")
         return self
 
 
