@@ -7,8 +7,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
-from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, Inventory, LegalEntity, Product, Sale, SaleItem, Warehouse
-from app.schemas.electronic_billing import ElectronicDocumentCreate, ElectronicDocumentOut, VoidElectronicDocument
+from app.models.entities import AccountReceivable, Branch, Customer, ElectronicDocument, ElectronicDocumentArtifact, ElectronicDocumentEvent, Inventory, LegalEntity, Product, Sale, SaleItem, Warehouse
+from app.schemas.electronic_billing import ElectronicArtifactDownloadOut, ElectronicDocumentArtifactOut, ElectronicDocumentCreate, ElectronicDocumentEventOut, ElectronicDocumentOut, ElectronicDocumentTraceOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission, require_second_factor
@@ -26,6 +26,8 @@ from app.services.payment_terms import resolve_payment_term
 from app.services.taxes import resolve_default_tax_rate
 from app.services.cost_centers import resolve_cost_center
 from app.services.apisunat_credentials import resolve_apisunat_credentials
+from app.services.cpe_evidence import capture_provider_evidence, record_cpe_event
+from app.storage.supabase import signed_url
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -176,6 +178,40 @@ def get_electronic_document(sale_id: str, actor: Actor = Depends(require_permiss
     return document
 
 
+@router.get("/{sale_id}/electronic-document/trace", response_model=ElectronicDocumentTraceOut)
+def get_electronic_document_trace(sale_id: str, actor: Actor = Depends(require_permission("electronic_billing:read")), db: Session = Depends(get_db)):
+    """Return tenant-scoped, immutable fiscal trace metadata without URLs."""
+    _, document = _electronic_document(sale_id, actor, db)
+    if not document:
+        raise HTTPException(status_code=404, detail="La venta no tiene un comprobante electrónico")
+    artifacts = db.scalars(select(ElectronicDocumentArtifact).where(
+        ElectronicDocumentArtifact.tenant_id == actor.tenant_id,
+        ElectronicDocumentArtifact.electronic_document_id == document.id,
+    ).order_by(ElectronicDocumentArtifact.captured_at.desc())).all()
+    events = db.scalars(select(ElectronicDocumentEvent).where(
+        ElectronicDocumentEvent.tenant_id == actor.tenant_id,
+        ElectronicDocumentEvent.electronic_document_id == document.id,
+    ).order_by(ElectronicDocumentEvent.created_at.desc())).all()
+    return {"document_id": document.id, "artifacts": artifacts, "events": events}
+
+
+@router.get("/{sale_id}/electronic-document/artifacts/{artifact_id}/download", response_model=ElectronicArtifactDownloadOut)
+async def download_electronic_artifact(sale_id: str, artifact_id: UUID, actor: Actor = Depends(require_permission("electronic_billing:read")), db: Session = Depends(get_db)):
+    """Issue a short-lived private URL after validating sale, tenant and evidence."""
+    _, document = _electronic_document(sale_id, actor, db)
+    if not document:
+        raise HTTPException(status_code=404, detail="La venta no tiene un comprobante electrónico")
+    artifact = db.scalar(select(ElectronicDocumentArtifact).where(
+        ElectronicDocumentArtifact.id == artifact_id,
+        ElectronicDocumentArtifact.tenant_id == actor.tenant_id,
+        ElectronicDocumentArtifact.electronic_document_id == document.id,
+        ElectronicDocumentArtifact.capture_status == "stored",
+    ))
+    if not artifact or not artifact.storage_path:
+        raise HTTPException(status_code=404, detail="El archivo fiscal solicitado no está disponible")
+    return {"url": await signed_url(artifact.storage_path, expires_in=300), "expires_in": 300}
+
+
 @router.post("/{sale_id}/electronic-document", response_model=ElectronicDocumentOut, status_code=status.HTTP_201_CREATED)
 def issue_electronic_document(sale_id: str, request: Request, response: Response, data: ElectronicDocumentCreate, actor: Actor = Depends(require_permission("electronic_billing:write")), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
@@ -287,6 +323,10 @@ def issue_electronic_document(sale_id: str, request: Request, response: Response
     db.add(document)
     try:
         db.flush()
+        record_cpe_event(
+            db, document=document, event_type="reserved", actor_user_id=actor.user_id,
+            payload=body, detail="Comprobante reservado para envío asíncrono",
+        )
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="reserve", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=file_name)
         enqueue(
             db,
@@ -326,8 +366,11 @@ def refresh_electronic_document(sale_id: str, actor: Actor = Depends(require_per
     document.status = provider_status(response.get("status"))
     document.xml_url = response.get("xml") if isinstance(response.get("xml"), str) else document.xml_url
     document.cdr_url = response.get("cdr") if isinstance(response.get("cdr"), str) else document.cdr_url
-    document.provider_payload = response
-    document.last_error = None if document.status in {"pending", "accepted"} else str(response.get("faults") or response.get("notes") or "APISUNAT reportó observaciones")
+    document.last_error = None if document.status in {"submitted", "accepted"} else str(response.get("faults") or response.get("notes") or "APISUNAT reportó observaciones")
+    capture_provider_evidence(
+        db, document=document, provider_response=response,
+        event_type="provider_refresh", actor_user_id=actor.user_id,
+    )
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="refresh", module="electronic_billing", entity="electronic_document", entity_id=document.id)
     db.commit()
     db.refresh(document)
@@ -360,7 +403,10 @@ def void_electronic_document(sale_id: str, data: VoidElectronicDocument, actor: 
     except APISunatError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     document.status = "void_pending"
-    document.provider_payload = response
+    capture_provider_evidence(
+        db, document=document, provider_response=response,
+        event_type="void_requested", actor_user_id=actor.user_id,
+    )
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="void", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=data.reason)
     db.commit()
     db.refresh(document)

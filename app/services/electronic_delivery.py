@@ -12,6 +12,7 @@ from app.models.entities import ElectronicDocument, LegalEntity
 from app.services.apisunat import APISunatError, send_bill
 from app.services.apisunat_credentials import resolve_apisunat_credentials
 from app.services.audit import record
+from app.services.cpe_evidence import capture_provider_evidence, record_cpe_event
 
 
 def provider_status(value: object) -> str:
@@ -45,6 +46,7 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
         if document.status == "submitted":
             document.status = "unknown"
             document.last_error = "La entrega al proveedor fue interrumpida; requiere conciliación antes de reemitir"
+            record_cpe_event(db, document=document, event_type="submission_unknown", actor_user_id=actor_user_id, detail=document.last_error)
             record(db, tenant_id=tenant_id, actor_user_id=actor_user_id, action="submission_unknown", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=document.file_name)
             db.commit()
             return
@@ -52,6 +54,7 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
         if not isinstance(submission, dict) or not isinstance(submission.get("document_body"), dict):
             document.status = "unknown"
             document.last_error = "No se encontró el contenido reservado para enviar el comprobante"
+            record_cpe_event(db, document=document, event_type="submission_unknown", actor_user_id=actor_user_id, detail=document.last_error)
             record(db, tenant_id=tenant_id, actor_user_id=actor_user_id, action="submission_unknown", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=document.file_name)
             db.commit()
             return
@@ -61,6 +64,7 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
         if not document.legal_entity_id:
             document.status = "unknown"
             document.last_error = "El comprobante no tiene entidad legal; no puede enviarse al proveedor"
+            record_cpe_event(db, document=document, event_type="submission_unknown", actor_user_id=actor_user_id, detail=document.last_error)
             db.commit()
             return
         legal_entity = db.scalar(select(LegalEntity).where(
@@ -70,6 +74,7 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
         if not legal_entity:
             document.status = "unknown"
             document.last_error = "No se encontró la entidad legal del comprobante"
+            record_cpe_event(db, document=document, event_type="submission_unknown", actor_user_id=actor_user_id, detail=document.last_error)
             db.commit()
             return
         credentials = resolve_apisunat_credentials(
@@ -97,6 +102,7 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
             if document:
                 document.status = "unknown"
                 document.last_error = str(exc)
+                record_cpe_event(db, document=document, event_type="submission_unknown", actor_user_id=actor_user_id, detail=document.last_error)
                 record(db, tenant_id=tenant_id, actor_user_id=actor_user_id, action="submission_unknown", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=document.file_name)
                 db.commit()
         return
@@ -107,9 +113,12 @@ def deliver_cpe_submission(event: dict[str, object]) -> None:
             return
         document.status = provider_status(provider_response.get("status"))
         document.provider_document_id = provider_response.get("documentId")
-        document.provider_payload = provider_response
         document.xml_url = provider_response.get("xml") if isinstance(provider_response.get("xml"), str) else None
         document.cdr_url = provider_response.get("cdr") if isinstance(provider_response.get("cdr"), str) else None
         document.last_error = None if document.status in {"submitted", "accepted"} else str(provider_response.get("faults") or provider_response.get("notes") or "APISUNAT reportó observaciones")
+        capture_provider_evidence(
+            db, document=document, provider_response=provider_response,
+            event_type="provider_response", actor_user_id=actor_user_id,
+        )
         record(db, tenant_id=tenant_id, actor_user_id=actor_user_id, action="provider_response", module="electronic_billing", entity="electronic_document", entity_id=document.id, detail=f"{document.file_name} · {document.status}")
         db.commit()

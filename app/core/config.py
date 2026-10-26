@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # APISUNAT stays entirely server-side. The development token is a Render
     # secret and is never exposed through the browser or persisted in SQL.
     apisunat_base_url: AnyHttpUrl = "https://back.apisunat.com"
+    # Exact extra hosts used by the provider to serve CPE artifacts (comma-separated).
+    # Empty means only the configured APISUNAT host is trusted, preventing SSRF.
+    apisunat_artifact_allowed_hosts: str = ""
     apisunat_persona_id: str | None = None
     apisunat_persona_token: str | None = Field(default=None, repr=False)
     apisunat_issuer_ruc: str | None = None

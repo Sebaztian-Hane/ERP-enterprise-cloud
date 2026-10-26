@@ -33,6 +33,43 @@ class ElectronicDocumentOut(ORMModel):
     currency: str
     xml_url: str | None
     cdr_url: str | None
+    provider_response_hash: str | None
+    provider_response_at: datetime | None
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ElectronicDocumentArtifactOut(ORMModel):
+    """Safe artifact metadata; storage paths and provider URLs remain private."""
+
+    id: UUID
+    artifact_type: str
+    capture_status: str
+    content_type: str | None
+    size_bytes: int | None
+    content_hash: str | None
+    provider_document_id: str | None
+    error_message: str | None
+    captured_at: datetime
+
+
+class ElectronicDocumentEventOut(ORMModel):
+    id: UUID
+    event_type: str
+    document_status: str | None
+    provider_document_id: str | None
+    payload_hash: str | None
+    detail: str | None
+    created_at: datetime
+
+
+class ElectronicDocumentTraceOut(BaseModel):
+    document_id: UUID
+    artifacts: list[ElectronicDocumentArtifactOut]
+    events: list[ElectronicDocumentEventOut]
+
+
+class ElectronicArtifactDownloadOut(BaseModel):
+    url: str
+    expires_in: int

@@ -21,6 +21,20 @@ async def upload(path: str, file: UploadFile, content: bytes) -> None:
         raise HTTPException(status_code=502, detail="No se pudo guardar el documento")
 
 
+def upload_bytes(path: str, content: bytes, *, content_type: str) -> None:
+    """Store server-generated evidence without creating a public object."""
+    settings = get_settings()
+    headers = _headers() | {"Content-Type": content_type, "x-upsert": "false"}
+    url = f"{str(settings.supabase_url).rstrip('/')}/storage/v1/object/{settings.documents_bucket}/{quote(path, safe='/')}"
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post(url, headers=headers, content=content)
+    except httpx.HTTPError as exc:
+        raise RuntimeError("No se pudo guardar la evidencia fiscal") from exc
+    if response.is_error:
+        raise RuntimeError("No se pudo guardar la evidencia fiscal")
+
+
 async def signed_url(path: str, expires_in: int = 300) -> str:
     settings = get_settings()
     url = f"{str(settings.supabase_url).rstrip('/')}/storage/v1/object/sign/{settings.documents_bucket}/{quote(path, safe='/')}"

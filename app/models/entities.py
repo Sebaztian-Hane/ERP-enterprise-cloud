@@ -427,7 +427,45 @@ class ElectronicDocument(TimestampedTenantModel):
     xml_url: Mapped[str | None] = mapped_column(Text)
     cdr_url: Mapped[str | None] = mapped_column(Text)
     provider_payload: Mapped[dict | None] = mapped_column(JSONB)
+    provider_response_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ElectronicDocumentArtifact(Base):
+    __tablename__ = "electronic_document_artifacts"
+    __table_args__ = (Index("ix_cpe_artifacts_tenant_document_captured", "tenant_id", "electronic_document_id", "captured_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    electronic_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("electronic_documents.id", ondelete="RESTRICT"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    capture_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    storage_path: Mapped[str | None] = mapped_column(String(512))
+    content_type: Mapped[str | None] = mapped_column(String(120))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_document_id: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    captured_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ElectronicDocumentEvent(Base):
+    __tablename__ = "electronic_document_events"
+    __table_args__ = (Index("ix_cpe_events_tenant_document_created", "tenant_id", "electronic_document_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    electronic_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("electronic_documents.id", ondelete="RESTRICT"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    document_status: Mapped[str | None] = mapped_column(String(24))
+    provider_document_id: Mapped[str | None] = mapped_column(String(80))
+    payload_hash: Mapped[str | None] = mapped_column(String(64))
+    detail: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Payment(TimestampedTenantModel):
