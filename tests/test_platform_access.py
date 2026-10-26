@@ -45,3 +45,27 @@ def test_platform_ruc_lookup_reuses_server_side_decolecta(monkeypatch):
     )
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_platform_owner_credentials_are_sent_by_email(monkeypatch):
+    from app.api.routes import platform
+
+    delivered: dict[str, str] = {}
+
+    async def capture_email(settings, *, recipient, subject, html):
+        delivered.update(recipient=recipient, subject=subject, html=html)
+
+    monkeypatch.setattr(platform, "send_brevo_email", capture_email)
+
+    await platform.send_platform_owner_credentials(
+        object(),
+        owner_email="owner@example.com",
+        tenant_name="Empresa de prueba",
+        temporary_password="Temporal123!",
+    )
+
+    assert delivered["recipient"] == "owner@example.com"
+    assert delivered["subject"] == "Tus credenciales temporales de EnterpriseCloud"
+    assert "Empresa de prueba" in delivered["html"]
+    assert "Temporal123!" in delivered["html"]

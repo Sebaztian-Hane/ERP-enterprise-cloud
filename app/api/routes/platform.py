@@ -20,6 +20,7 @@ from app.security.auth import PlatformActor, require_platform_admin
 from app.services.audit import record
 from app.services.supabase_admin import create_user
 from app.services.apisunat_credentials import encrypt_persona_token
+from app.services.brevo import invitation_html, send_brevo_email
 from app.services.decolecta import DecolectaError, lookup_tax_id
 
 
@@ -49,6 +50,26 @@ def tenant_payload(tenant: Tenant, active_members: int) -> PlatformTenantOut:
         is_active=tenant.is_active,
         created_at=tenant.created_at,
         active_members=active_members,
+    )
+
+
+async def send_platform_owner_credentials(
+    settings,
+    *,
+    owner_email: str,
+    tenant_name: str,
+    temporary_password: str,
+) -> None:
+    """Deliver the one-time tenant owner credentials after provisioning."""
+    await send_brevo_email(
+        settings,
+        recipient=owner_email,
+        subject="Tus credenciales temporales de EnterpriseCloud",
+        html=invitation_html(
+            temporary_password=temporary_password,
+            tenant_name=tenant_name,
+            role="Propietario",
+        ),
     )
 
 
@@ -127,7 +148,6 @@ def update_platform_tenant(
 @router.post("/tenants", response_model=PlatformTenantOut, status_code=201)
 @limiter.limit("10/hour")
 async def create_platform_tenant(request: Request, response: Response, data: PlatformTenantCreate, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
-    from app.core.config import get_settings
     # Validate server-side encryption before provisioning an external auth user.
     # The plaintext is intentionally discarded immediately after ciphertext is made.
     persona_token_ciphertext = encrypt_persona_token(data.apisunat_persona_token)
@@ -148,6 +168,12 @@ async def create_platform_tenant(request: Request, response: Response, data: Pla
     db.add(TenantMembership(tenant_id=tenant.id, user_id=user_id, role_code="owner"))
     record(db, tenant_id=tenant.id, actor_user_id=actor.user_id, action="platform_create_tenant", module="platform", entity="tenant", entity_id=tenant.id)
     db.commit(); db.refresh(tenant)
+    await send_platform_owner_credentials(
+        get_settings(),
+        owner_email=str(data.owner_email),
+        tenant_name=tenant.name,
+        temporary_password=data.temporary_password,
+    )
     return tenant_payload(tenant, 1)
 
 
