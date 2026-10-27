@@ -223,6 +223,28 @@ def require_permission(permission: str, module_code: str | None = None):
     return check
 
 
+def require_administrative_sales_write(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:
+    """Allow administrative sale posting except for retail-only tenants.
+
+    Retail users retain access to sales history and its post-sale actions, but
+    their operational sale entry point is the POS checkout command.  This is a
+    server guard rather than a UI convention, so direct API requests cannot
+    bypass the selected business profile.
+    """
+    granted = ROLE_PERMISSIONS.get(actor.role_code, set())
+    if "*" not in granted and "sales:write" not in granted:
+        raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
+    if not module_is_enabled(db, actor, "sales"):
+        raise HTTPException(status_code=403, detail="Este módulo no está habilitado para su acceso")
+    tenant = db.get(Tenant, actor.tenant_id)
+    if tenant and tenant.business_profile == "retail":
+        raise HTTPException(
+            status_code=403,
+            detail="Las empresas minoristas registran ventas exclusivamente desde Punto de venta",
+        )
+    return actor
+
+
 def require_module(module_code: str):
     """Require an additional tenant module without weakening role permissions."""
     def check(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:

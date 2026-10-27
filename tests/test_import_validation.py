@@ -1,4 +1,10 @@
-from app.api.routes.imports import TEMPLATES, _validate_rows
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+from app.api.routes.imports import TEMPLATES, _ensure_import_module_allowed, _validate_rows
+from app.security.auth import Actor
 
 
 def test_inventory_template_includes_the_required_adjustment_number():
@@ -36,3 +42,17 @@ def test_inventory_import_rejects_decimal_units_and_zero_adjustments():
 
     assert decimal_errors[0]["message"] == "quantity debe ser un número entero"
     assert zero_errors[0]["message"] == "quantity no puede ser cero"
+
+
+def test_retail_tenant_cannot_import_administrative_sales():
+    actor = Actor(
+        user_id="00000000-0000-0000-0000-000000000001",
+        tenant_id="00000000-0000-0000-0000-000000000002",
+        role_code="owner",
+    )
+    db = SimpleNamespace(get=lambda _model, _id: SimpleNamespace(business_profile="retail"))
+
+    with pytest.raises(HTTPException, match="Punto de venta") as error:
+        _ensure_import_module_allowed("sales", actor, db)
+
+    assert error.value.status_code == 403

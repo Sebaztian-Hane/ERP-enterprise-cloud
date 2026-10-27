@@ -58,9 +58,17 @@ def _update_weighted_cost(product: Product, total_stock: Decimal, incoming_quant
         ).quantize(Decimal("0.01"))
 
 
-@router.get("/warehouses", response_model=list[WarehouseOut])
-def list_warehouses(actor: Actor = Depends(require_permission("inventory:read")), db: Session = Depends(get_db)):
-    return db.scalars(select(Warehouse).where(Warehouse.tenant_id == actor.tenant_id).order_by(Warehouse.name)).all()
+@router.get("/warehouses")
+def list_warehouses(
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    statement = select(Warehouse).where(Warehouse.tenant_id == actor.tenant_id).order_by(Warehouse.name)
+    if page is None and page_size is None:
+        return db.scalars(statement).all()
+    return paginate(db, statement, key="warehouses", page=page or 1, page_size=page_size or 25)
 
 
 @router.post("/warehouses", response_model=WarehouseOut, status_code=status.HTTP_201_CREATED)

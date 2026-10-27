@@ -35,6 +35,7 @@ from app.models.entities import (
     Sale,
     SaleItem,
     Supplier,
+    Tenant,
     UnitOfMeasure,
     Warehouse,
 )
@@ -51,6 +52,22 @@ router = APIRouter(prefix="/imports", tags=["imports"])
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 MAX_ROWS = 2_000
+
+
+def _ensure_import_module_allowed(module: str, actor: Actor, db: Session) -> None:
+    """Keep retail sales creation exclusive to the POS channel.
+
+    Importing historical sales would otherwise bypass the same commercial
+    channel rule enforced by the administrative sales endpoint.
+    """
+    if module != "sales":
+        return
+    tenant = db.get(Tenant, actor.tenant_id)
+    if tenant and tenant.business_profile == "retail":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Las empresas minoristas registran ventas exclusivamente desde Punto de venta",
+        )
 
 TEMPLATES: dict[str, dict[str, Any]] = {
     "products": {
@@ -422,6 +439,7 @@ def list_templates(actor: Actor = Depends(require_owner_or_admin)):
 
 @router.post("/{module}/preview")
 async def preview_import(module: str, file: UploadFile = File(...), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+    _ensure_import_module_allowed(module, actor, db)
     valid, errors, conflicts = await _preview(module, file, actor, db)
     return {"module": module, "valid_rows": len(valid), "errors": errors, "conflicts": conflicts, "can_commit": not errors and not conflicts, "sample": valid[:5]}
 
@@ -435,6 +453,7 @@ async def commit_import(
     _: Actor = Depends(require_second_factor),
     db: Session = Depends(get_db),
 ):
+    _ensure_import_module_allowed(module, actor, db)
     # UploadFile is a stream.  Its digest is part of the request identity, so a
     # reused key cannot accidentally apply a different spreadsheet.  Rewind it
     # before validation because _preview deliberately reparses the source file.

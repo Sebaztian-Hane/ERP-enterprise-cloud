@@ -1,6 +1,6 @@
 from uuid import UUID
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from app.api.routes.sales import post_sale
 from app.api.routes.purchases import receive_purchase
 from app.services.approval_documents import create_purchase_order_evidence
 from app.services.audit import record
+from app.schemas.pagination import paginate_mappings
 
 router = APIRouter(tags=["workflow"])
 
@@ -38,8 +39,26 @@ class WorkflowLine(BaseModel):
 
 def _register(prefix: str, table: str, counterparty: str, counterparty_model, write_permission: str, allowed: set[str], module_code: str | None = None):
     @router.get(prefix)
-    def list_docs(actor: Actor = Depends(require_permission(write_permission.replace(":write", ":read"), module_code)), db: Session = Depends(get_db)):
-        return db.execute(select(__import__("sqlalchemy").text("*")).select_from(__import__("sqlalchemy").text(table)).where(__import__("sqlalchemy").text("tenant_id = :tenant")).params(tenant=str(actor.tenant_id))).mappings().all()
+    def list_docs(
+        actor: Actor = Depends(require_permission(write_permission.replace(":write", ":read"), module_code)),
+        db: Session = Depends(get_db),
+        page: int | None = Query(default=None, ge=1),
+        page_size: int | None = Query(default=None, ge=1, le=100),
+    ):
+        sql = __import__("sqlalchemy").text
+        rows_statement = sql(f"select * from {table} where tenant_id=:tenant order by created_at desc, id desc limit :limit offset :offset")
+        if not isinstance(page, int) and not isinstance(page_size, int):
+            return db.execute(rows_statement, {"tenant": str(actor.tenant_id), "limit": 10_000, "offset": 0}).mappings().all()
+        key = {"sales_quotes": "quotes", "sales_orders": "orders", "purchase_orders": "orders"}[table]
+        return paginate_mappings(
+            db,
+            rows_statement=rows_statement,
+            count_statement=sql(f"select count(*) from {table} where tenant_id=:tenant"),
+            params={"tenant": str(actor.tenant_id)},
+            key=key,
+            page=page or 1,
+            page_size=page_size or 25,
+        )
 
     @router.post(prefix, status_code=status.HTTP_201_CREATED)
     def create_doc(data: WorkflowCreate, actor: Actor = Depends(require_permission(write_permission, module_code)), db: Session = Depends(get_db)):

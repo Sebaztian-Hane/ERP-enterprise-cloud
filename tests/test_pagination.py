@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-from sqlalchemy import column, select
+from sqlalchemy import column, select, text
 
-from app.schemas.pagination import paginate
+from app.schemas.pagination import paginate, paginate_mappings
 
 
 class PageSession:
@@ -30,3 +30,29 @@ def test_paginate_returns_named_items_and_complete_metadata():
         "has_previous": True,
         "has_next": False,
     }
+
+
+def test_paginate_mappings_returns_rows_with_metadata():
+    class MappingSession:
+        def scalar(self, statement):
+            return 26
+
+        def execute(self, statement, params):
+            assert params["limit"] == 25
+            assert params["offset"] == 25
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [{"number": "PV-026"}]))
+
+    result = paginate_mappings(
+        MappingSession(),
+        rows_statement=text("select * from documents limit :limit offset :offset"),
+        count_statement=text("select count(*) from documents"),
+        params={},
+        key="documents",
+        page=2,
+        page_size=25,
+    )
+
+    assert result["documents"] == [{"number": "PV-026"}]
+    assert result["meta"]["total"] == 26
+    assert result["meta"]["has_previous"] is True
+    assert result["meta"]["has_next"] is False

@@ -11,7 +11,7 @@ from app.models.entities import AccountReceivable, Branch, Customer, ElectronicD
 from app.schemas.electronic_billing import ElectronicArtifactDownloadOut, ElectronicDocumentArtifactOut, ElectronicDocumentCreate, ElectronicDocumentEventOut, ElectronicDocumentOut, ElectronicDocumentTraceOut, VoidElectronicDocument
 from app.schemas.transactions import CancelTransaction, CommercialReturnCreate, CommercialReturnOut, PosCheckoutCreate, PosTenderCreate, PriceListQuoteCreate, SaleCreate, SaleOut
 from app.schemas.pagination import paginate
-from app.security.auth import Actor, require_permission, require_second_factor
+from app.security.auth import Actor, require_administrative_sales_write, require_permission, require_second_factor
 from app.services.audit import record
 from app.services.apisunat import APISunatError, build_document_body, get_document, next_correlative, void_bill
 from app.services.traceability import issue_tracked_stock, return_tracked_sale_stock
@@ -719,7 +719,7 @@ def post_pos_checkout(
 
 
 @router.post("", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
-def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require_permission("sales:write")), db: Session = Depends(get_db)):
+def post_sale(request: Request, data: SaleCreate, actor: Actor = Depends(require_administrative_sales_write), db: Session = Depends(get_db)):
     idempotency = claim_idempotency(
         db,
         tenant_id=actor.tenant_id,

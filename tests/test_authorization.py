@@ -9,7 +9,7 @@ from app.api.routes.customers import list_customers
 from app.api.routes.tenants import ensure_active_owner_remains, require_owner_role_change
 from app.schemas.common import MembershipUpdate
 from app.security import auth
-from app.security.auth import Actor, ensure_token_not_revoked, get_actor, require_permission, require_second_factor, token_issued_at
+from app.security.auth import Actor, ensure_token_not_revoked, get_actor, require_administrative_sales_write, require_permission, require_second_factor, token_issued_at
 
 
 class ScalarResult:
@@ -66,6 +66,25 @@ def test_sales_role_can_issue_its_own_electronic_documents():
     check = require_permission("electronic_billing:write")
     actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="sales")
     assert check(actor) == actor
+
+
+def test_retail_tenant_cannot_create_administrative_sales(monkeypatch):
+    actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="sales")
+    db = SimpleNamespace(get=lambda model, value: SimpleNamespace(business_profile="retail"))
+    monkeypatch.setattr(auth, "module_is_enabled", lambda *_: True)
+
+    with pytest.raises(HTTPException, match="Punto de venta") as error:
+        require_administrative_sales_write(actor, db)
+
+    assert error.value.status_code == 403
+
+
+def test_wholesale_tenant_can_create_administrative_sales(monkeypatch):
+    actor = Actor(user_id=uuid4(), tenant_id=uuid4(), role_code="sales")
+    db = SimpleNamespace(get=lambda model, value: SimpleNamespace(business_profile="wholesale"))
+    monkeypatch.setattr(auth, "module_is_enabled", lambda *_: True)
+
+    assert require_administrative_sales_write(actor, db) == actor
 
 
 def test_customer_listing_is_scoped_to_actor_tenant():

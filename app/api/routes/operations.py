@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.services.internal_signatures import (
     verify_p256_signature,
 )
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
+from app.schemas.pagination import paginate_mappings
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -318,8 +319,24 @@ def release_reservation(reservation_id: UUID, request: Request, actor: Actor = D
 
 
 @router.get("/inventory/counts")
-def list_counts(actor: Actor = Depends(require_permission("inventory:read")), db: Session = Depends(get_db)):
-    return db.execute(text("select * from inventory_counts where tenant_id=:tenant order by created_at desc"), {"tenant": str(actor.tenant_id)}).mappings().all()
+def list_counts(
+    actor: Actor = Depends(require_permission("inventory:read")),
+    db: Session = Depends(get_db),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=100),
+):
+    rows = text("select * from inventory_counts where tenant_id=:tenant order by created_at desc, id desc limit :limit offset :offset")
+    if page is None and page_size is None:
+        return db.execute(rows, {"tenant": str(actor.tenant_id), "limit": 10_000, "offset": 0}).mappings().all()
+    return paginate_mappings(
+        db,
+        rows_statement=rows,
+        count_statement=text("select count(*) from inventory_counts where tenant_id=:tenant"),
+        params={"tenant": str(actor.tenant_id)},
+        key="counts",
+        page=page or 1,
+        page_size=page_size or 25,
+    )
 
 
 @router.post("/inventory/counts", status_code=status.HTTP_201_CREATED)
