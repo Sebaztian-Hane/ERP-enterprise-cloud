@@ -249,6 +249,7 @@ def append_internal_decision_evidence(
     signature_value: str | None = None,
     signature_challenge_id: UUID | None = None,
     delegated_from_user_id: UUID | None = None,
+    handwritten_signature_svg: str | None = None,
 ) -> None:
     """Append the internal approval evidence; never mutate the original payload."""
     document = db.execute(text("""
@@ -270,10 +271,10 @@ def append_internal_decision_evidence(
         insert into approval_signatures(
           tenant_id, approval_document_id, approval_request_id, signer_user_id,
           signature_type, decision, signed_hash, signing_key_id, signature_algorithm, signature_value
-          ,signature_challenge_id, delegated_from_user_id
+          ,signature_challenge_id, delegated_from_user_id, handwritten_signature_svg
         ) values (
           :tenant, :document, :request, :signer, 'internal_approval', :decision, :digest,
-          :key, :algorithm, :signature, :challenge, :delegated_from
+          :key, :algorithm, :signature, :challenge, :delegated_from, :handwritten_signature_svg
         ) on conflict (approval_request_id) where signature_type='internal_approval' do nothing
     """), {
         "tenant": str(tenant_id), "document": str(document["id"]), "request": str(approval_request_id),
@@ -283,6 +284,7 @@ def append_internal_decision_evidence(
         "signature": signature_value,
         "challenge": str(signature_challenge_id) if signature_challenge_id else None,
         "delegated_from": str(delegated_from_user_id) if delegated_from_user_id else None,
+        "handwritten_signature_svg": handwritten_signature_svg,
     })
     db.execute(text("""
         update approval_documents set status=:decision, updated_at=now()

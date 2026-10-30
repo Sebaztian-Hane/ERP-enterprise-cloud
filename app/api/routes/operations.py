@@ -19,6 +19,7 @@ from app.services.internal_signatures import (
 )
 from app.services.idempotency import claim as claim_idempotency, complete as complete_idempotency, replay_response
 from app.schemas.pagination import paginate_mappings
+from app.services.handwritten_signatures import approval_is_signed, validate_handwritten_signature_svg
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -67,6 +68,12 @@ class DecisionIn(BaseModel):
     challenge_id: UUID
     signing_key_id: UUID
     signature: str = Field(min_length=80, max_length=512)
+    handwritten_signature_svg: str = Field(min_length=1, max_length=60_000)
+
+    @field_validator("handwritten_signature_svg")
+    @classmethod
+    def handwritten_signature_must_be_safe(cls, value: str) -> str:
+        return validate_handwritten_signature_svg(value)
 
 
 class SigningKeyIn(BaseModel):
@@ -392,11 +399,9 @@ def submit_count(count_id: UUID, request: Request, actor: Actor = Depends(requir
         raise HTTPException(status_code=409, detail="El conteo no está en borrador")
     policy = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='inventory' and action='physical_count'
        and is_active=true order by min_amount desc limit 1"""), {"tenant": str(actor.tenant_id)}).scalar()
-    request_id = None
-    if policy:
-        request_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
-           values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,jsonb_build_object('number',:number),:actor)
-           returning id"""), {"tenant": str(actor.tenant_id), "policy": str(policy), "count": str(count_id), "number": row["number"], "actor": str(actor.user_id)}).scalar_one()
+    request_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
+       values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,jsonb_build_object('number',:number),:actor)
+       returning id"""), {"tenant": str(actor.tenant_id), "policy": str(policy) if policy else None, "count": str(count_id), "number": row["number"], "actor": str(actor.user_id)}).scalar_one()
     create_inventory_count_evidence(
         db, tenant_id=actor.tenant_id, count_id=count_id, approval_request_id=request_id, requested_by=actor.user_id,
     )
@@ -419,15 +424,17 @@ def apply_count(count_id: UUID, request: Request, actor: Actor = Depends(require
     if not count or count["status"] not in {"submitted", "approved"}:
         raise HTTPException(status_code=409, detail="El conteo debe estar enviado o aprobado antes de aplicarse")
     approval = db.execute(text("""
-        select r.status, r.requested_by, r.decided_by,
+        select r.status, r.requested_by, r.decided_by, s.id as signature_id,
                coalesce(p.require_executor_separation, true) as require_executor_separation
         from approval_requests r
         left join approval_policies p on p.id=r.policy_id and p.tenant_id=r.tenant_id
+        left join approval_signatures s on s.approval_request_id=r.id and s.tenant_id=r.tenant_id
+          and s.signature_type='internal_approval' and s.decision='approved'
         where r.tenant_id=:tenant and r.entity_type='inventory_count' and r.entity_id=:id
         order by r.created_at desc limit 1
     """), {"tenant": str(actor.tenant_id), "id": str(count_id)}).mappings().first()
-    if approval and approval["status"] != "approved":
-        raise HTTPException(status_code=409, detail="El inventario físico requiere una aprobación antes de aplicarse")
+    if not approval_is_signed(approval):
+        raise HTTPException(status_code=409, detail="El inventario físico requiere una aprobación firmada antes de aplicarse")
     if approval and approval["require_executor_separation"] and str(actor.user_id) in {
         str(approval["requested_by"]), str(approval["decided_by"]),
     }:
@@ -726,7 +733,7 @@ def approve_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(r
       returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
     if not row:
         raise HTTPException(status_code=409, detail="No puede aprobar esta solicitud o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="approved", **signature)
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="approved", handwritten_signature_svg=data.handwritten_signature_svg, **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='approved' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     elif row["entity_type"] == "inventory_count":
@@ -763,7 +770,7 @@ def reject_request(request_id: UUID, data: DecisionIn, actor: Actor = Depends(re
       where r.id=:id and r.tenant_id=:tenant and r.status='pending' and r.requested_by <> :actor
       returning r.*"""), {"id": str(request_id), "tenant": str(actor.tenant_id), "actor": str(actor.user_id), "note": data.decision_note}).mappings().first()
     if not row: raise HTTPException(status_code=409, detail="La solicitud no existe o ya fue resuelta")
-    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="rejected", **signature)
+    append_internal_decision_evidence(db, tenant_id=actor.tenant_id, approval_request_id=request_id, signer_user_id=actor.user_id, delegated_from_user_id=delegated_from_user_id, decision="rejected", handwritten_signature_svg=data.handwritten_signature_svg, **signature)
     if row["entity_type"] == "purchase_order":
         db.execute(text("""update purchase_orders set status='cancelled' where id=:id and tenant_id=:tenant and status='submitted'"""), {"id": str(row["entity_id"]), "tenant": str(actor.tenant_id)})
     elif row["entity_type"] == "inventory_count":

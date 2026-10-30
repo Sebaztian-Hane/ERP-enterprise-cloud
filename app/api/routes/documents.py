@@ -84,7 +84,8 @@ def list_approval_records(
                  'signed_hash', s.signed_hash, 'signed_at', s.signed_at,
                  'certificate_subject', s.certificate_subject, 'certificate_issuer', s.certificate_issuer,
                  'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference,
-                 'signature_algorithm', s.signature_algorithm
+                 'signature_algorithm', s.signature_algorithm,
+                 'handwritten_signature_svg', s.handwritten_signature_svg
                ) order by s.created_at) filter (where s.id is not null), '[]'::jsonb) as signatures
         from approval_documents d
         left join approval_signatures s on s.approval_document_id=d.id and s.tenant_id=d.tenant_id
@@ -103,7 +104,8 @@ def approval_record(record_id: UUID, actor: Actor = Depends(require_permission("
           'signed_hash', s.signed_hash, 'signed_at', s.signed_at,
           'certificate_subject', s.certificate_subject, 'certificate_issuer', s.certificate_issuer,
           'certificate_serial', s.certificate_serial, 'provider_reference', s.provider_reference,
-          'signature_algorithm', s.signature_algorithm
+          'signature_algorithm', s.signature_algorithm,
+          'handwritten_signature_svg', s.handwritten_signature_svg
         ) order by s.created_at) filter (where s.id is not null), '[]'::jsonb) as signatures
         from approval_documents d
         left join approval_signatures s on s.approval_document_id=d.id and s.tenant_id=d.tenant_id
@@ -133,7 +135,8 @@ def verify_approval_record(record_id: UUID, actor: Actor = Depends(require_permi
     signatures = db.execute(text("""
         select s.id, s.signature_type, s.decision, s.signed_hash, s.signer_user_id,
                s.signing_key_id, s.signature_value, s.signature_algorithm,
-               s.delegated_from_user_id, s.signed_at, c.id as challenge_id, k.public_jwk
+               s.delegated_from_user_id, s.signed_at, s.handwritten_signature_svg,
+               c.id as challenge_id, k.public_jwk
         from approval_signatures s
         left join approval_signature_challenges c on c.id=s.signature_challenge_id
         left join user_signing_keys k on k.id=s.signing_key_id and k.tenant_id=s.tenant_id
@@ -161,6 +164,7 @@ def verify_approval_record(record_id: UUID, actor: Actor = Depends(require_permi
             "id": signature["id"], "type": signature["signature_type"], "decision": signature["decision"],
             "signed_at": signature["signed_at"], "signer_user_id": signature["signer_user_id"],
             "delegated_from_user_id": signature["delegated_from_user_id"], "verified": verified, "reason": reason,
+            "handwritten_signature_svg": signature["handwritten_signature_svg"],
         })
     attachments = db.execute(text("""
         select id, document_id, original_filename, content_type, size_bytes, content_hash, created_at
