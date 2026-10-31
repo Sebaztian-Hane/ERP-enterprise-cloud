@@ -658,7 +658,7 @@ def _delegated_from_for_request(request_id: UUID, actor: Actor, db: Session) -> 
         select r.id, r.status, r.requested_by, r.module, r.action, p.required_role
         from approval_requests r
         left join approval_policies p on p.id=r.policy_id and p.tenant_id=r.tenant_id
-        where r.id=:id and r.tenant_id=:tenant for update
+        where r.id=:id and r.tenant_id=:tenant for update of r
     """), {"id": str(request_id), "tenant": str(actor.tenant_id)}).mappings().first()
     if not request or request["status"] != "pending" or request["requested_by"] == actor.user_id:
         raise HTTPException(status_code=409, detail="No puede decidir esta solicitud o ya fue resuelta")
