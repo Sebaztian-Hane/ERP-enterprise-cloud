@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -22,6 +23,17 @@ from app.schemas.pagination import paginate_mappings
 from app.services.handwritten_signatures import approval_is_signed, validate_handwritten_signature_svg
 
 router = APIRouter(prefix="/operations", tags=["operations"])
+
+
+def physical_count_approval_payload(number: str) -> str:
+    """Serialize the count reference before passing it to PostgreSQL jsonb.
+
+    ``jsonb_build_object('number', :number)`` leaves the bind parameter
+    untyped with psycopg/PostgreSQL and fails at execution time.  Passing a
+    serialized document with an explicit jsonb cast keeps the approval write
+    deterministic and portable across drivers.
+    """
+    return json.dumps({"number": number}, ensure_ascii=False, separators=(",", ":"))
 
 
 class ReservationIn(BaseModel):
@@ -400,8 +412,8 @@ def submit_count(count_id: UUID, request: Request, actor: Actor = Depends(requir
     policy = db.execute(text("""select id from approval_policies where tenant_id=:tenant and module='inventory' and action='physical_count'
        and is_active=true order by min_amount desc limit 1"""), {"tenant": str(actor.tenant_id)}).scalar()
     request_id = db.execute(text("""insert into approval_requests(tenant_id,policy_id,module,action,entity_type,entity_id,payload,requested_by)
-       values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,jsonb_build_object('number',:number),:actor)
-       returning id"""), {"tenant": str(actor.tenant_id), "policy": str(policy) if policy else None, "count": str(count_id), "number": row["number"], "actor": str(actor.user_id)}).scalar_one()
+       values(:tenant,:policy,'inventory','physical_count','inventory_count',:count,cast(:payload as jsonb),:actor)
+       returning id"""), {"tenant": str(actor.tenant_id), "policy": str(policy) if policy else None, "count": str(count_id), "payload": physical_count_approval_payload(row["number"]), "actor": str(actor.user_id)}).scalar_one()
     create_inventory_count_evidence(
         db, tenant_id=actor.tenant_id, count_id=count_id, approval_request_id=request_id, requested_by=actor.user_id,
     )
