@@ -14,8 +14,15 @@ from app.security.auth import Actor, get_actor, get_user_id, revoke_user_tokens
 from app.services.audit import record
 from app.services.brevo import password_code_html, send_brevo_email
 from app.services.supabase_admin import get_user_email, update_password
+from app.services.workspace_access import workspace_access
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.get("/access")
+@limiter.limit("60/minute")
+def access(request: Request, response: Response, actor: Actor = Depends(get_actor), db: Session = Depends(get_db)):
+    return workspace_access(actor, db)
 
 
 @router.get("/me")

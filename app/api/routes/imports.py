@@ -47,6 +47,7 @@ from app.schemas.materials import MaterialProfile
 from app.schemas.catalog import CustomerCreate, SupplierCreate
 from app.schemas.inventory import WarehouseCreate
 from app.services.material_master import PROFILE_FIELDS, material_template
+from app.services.material_capabilities import material_profiles_available, supported_material_template
 from app.services.migration_workbooks import csv_bytes, workbook_bytes
 from app.services.accounting import post_entry, split_tax
 from app.services.audit import record
@@ -528,19 +529,21 @@ async def _preview(module: str, upload: UploadFile, actor: Actor, db: Session) -
     references = _transaction_references(module, valid, actor, db) if module in {"inventory", "sales", "purchases"} and not errors else []
     if module == "products" and not errors:
         references += _product_references(valid, actor, db)
+        if any(row.get("material_profile") for row in valid) and not material_profiles_available(db):
+            references.append("La ficha industrial aún no está habilitada. Usa la plantilla disponible o solicita su habilitación al administrador.")
     return valid, errors, conflicts + references
 
 
 @router.get("/templates")
-def list_templates(actor: Actor = Depends(require_owner_or_admin)):
-    return [{"module": module, **template, "download_url": f"/imports/{module}/template", "export_url": "/imports/products/export" if module == "products" else None} for module, template in TEMPLATES.items()]
+def list_templates(actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+    return [{"module": module, **(supported_material_template(template, db) if module == "products" else template), "download_url": f"/imports/{module}/template", "export_url": "/imports/products/export" if module == "products" else None} for module, template in TEMPLATES.items()]
 
 
 @router.get("/{module}/template")
 def download_template(module: str, format: str = Query(default="xlsx", pattern="^(csv|xlsx)$"), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
     _ensure_import_permission(module, actor, db)
     _ensure_import_module_allowed(module, actor, db)
-    template = TEMPLATES[module]
+    template = supported_material_template(TEMPLATES[module], db) if module == "products" else TEMPLATES[module]
     catalogs = []
     if module == "products":
         catalogs += [["Unidad", item.code, item.name] for item in db.scalars(select(UnitOfMeasure).where(UnitOfMeasure.tenant_id == actor.tenant_id, UnitOfMeasure.is_active.is_(True))).all()]
@@ -557,13 +560,14 @@ def export_materials(format: str = Query(default="xlsx", pattern="^(csv|xlsx)$")
     products = db.scalars(select(Product).where(Product.tenant_id == actor.tenant_id).order_by(Product.sku, Product.id).limit(10001)).all()
     if len(products) > 10000:
         raise HTTPException(status_code=422, detail="La exportación interactiva admite hasta 10000 materiales. Usa un reporte segmentado para volúmenes mayores.")
-    profiles = {item.product_id: item.attributes for item in db.scalars(select(ProductMaterialProfile).where(ProductMaterialProfile.tenant_id == actor.tenant_id)).all()}
+    template = supported_material_template(TEMPLATES["products"], db)
+    profiles = {item.product_id: item.attributes for item in db.scalars(select(ProductMaterialProfile).where(ProductMaterialProfile.tenant_id == actor.tenant_id)).all()} if len(template["columns"]) > 9 else {}
     categories = {item.id: item.name for item in db.scalars(select(Category).where(Category.tenant_id == actor.tenant_id)).all()}
     rows = []
     for product in products:
         values = {"sku": product.sku, "name": product.name, "category": categories.get(product.category_id, ""), "unit": product.unit_code, "sale_price": str(product.sale_price), "average_cost": str(product.average_cost), "tracking_mode": product.tracking_mode, "cost_method": product.cost_method, "is_active": str(product.is_active).lower(), **profiles.get(product.id, {})}
-        rows.append([values.get(key, "") for key in TEMPLATES["products"]["columns"]])
-    content = csv_bytes(TEMPLATES["products"]["columns"], rows) if format == "csv" else workbook_bytes(TEMPLATES["products"], rows=rows)
+        rows.append([values.get(key, "") for key in template["columns"]])
+    content = csv_bytes(template["columns"], rows) if format == "csv" else workbook_bytes(template, rows=rows)
     record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="export", module="imports", entity="products", detail=f"{len(rows)} materiales; formato={format}")
     db.commit()
     mime = "text/csv; charset=utf-8" if format == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

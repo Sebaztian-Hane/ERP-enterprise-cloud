@@ -22,17 +22,10 @@ from app.services.supabase_admin import create_user
 from app.services.apisunat_credentials import encrypt_persona_token
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.decolecta import DecolectaError, lookup_tax_id
+from app.services.module_catalog import MODULES
 
 
 router = APIRouter(prefix="/platform", tags=["platform"])
-MODULES = [
-    ("sales", "Ventas"), ("pos", "Punto de venta"), ("customers", "Clientes"), ("quotes", "Cotizaciones"),
-    ("sales_orders", "Pedidos de venta"), ("purchases", "Compras"),
-    ("suppliers", "Proveedores"), ("purchase_orders", "Órdenes de compra"),
-    ("inventory", "Inventario"), ("products", "Productos"), ("finance", "Finanzas"),
-    ("reconciliation", "Conciliación"), ("documents", "Documentos"), ("reports", "Reportes"),
-    ("operations", "Control operativo"), ("administration", "Administración"),
-]
 MODULE_CODES = {code for code, _ in MODULES}
 PROFILE_BLOCKED_MODULES = {
     "retail": {"quotes", "sales_orders"},

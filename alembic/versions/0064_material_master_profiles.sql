@@ -21,4 +21,11 @@ revoke all on table public.product_material_profiles from anon, authenticated;
 create policy product_material_profiles_server_only on public.product_material_profiles
     for all to authenticated using (false) with check (false);
 
+-- The production API uses this existing server role; browser roles stay denied.
+do $$ begin
+    if exists (select 1 from pg_roles where rolname = 'erp_api') then
+        grant select, insert, update, delete on public.product_material_profiles to erp_api;
+    end if;
+end $$;
+
 commit;

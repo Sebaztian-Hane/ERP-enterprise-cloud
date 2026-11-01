@@ -162,8 +162,23 @@ rollback, separación entre tenants y permisos/MFA. La compilación y pruebas
 del frontend verifican el transporte y reintento idempotente. SQLite no
 certifica RLS, bloqueos/concurrencia ni la ejecución de la migración PostgreSQL.
 
-La herramienta de automatización visual de esta sesión no pudo inicializar su
-runtime; queda pendiente la revisión visual autenticada con la API actualizada.
+La regresión de navegador se ejecuta con Playwright en un contexto aislado,
+con datos de prueba y sin escribir en producción. Cubre los siete roles,
+restricciones de empresa, importación, reservas, consulta de materiales y
+presentación móvil. Se revisaron capturas de escritorio y móvil. La comprobación
+SQL de las consultas operativas también se ejecuta en una transacción de solo
+lectura contra la conexión autorizada del backend.
+
+La API puede publicarse antes de la migración 0064: anuncia nueve campos base
+mientras no exista la tabla industrial; no admite guardar atributos que aún
+no puede persistir. Después de aplicar la migración se habilitan 25 columnas en
+la siguiente consulta, sin reinicio. Contabilidad, Aprobaciones, Flujo de caja,
+Disponibilidad/reservas, Valoración y Guía usan rutas/esquemas ya existentes.
+
+El acceso efectivo se obtiene de `/auth/access`: se conservan los siete roles
+y sus permisos; se intersectan las restricciones por empresa/miembro y perfil
+comercial. Una habilitación individual no puede sobrepasar una restricción de
+empresa. La guía está en la URL pública con el fragmento `#guia`.
 
 Siguiente revisión por módulo: compra (recepción parcial y tres vías), venta
 (pedido–entrega–CPE–cobro), inventario (lotes/series/concurrencia/costeo),

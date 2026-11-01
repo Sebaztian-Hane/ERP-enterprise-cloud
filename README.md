@@ -21,10 +21,34 @@ La plantilla de materiales 2.0 ofrece 25 campos, conserva las cargas anteriores
 de seis columnas y separa el maestro de las existencias. Incluye validación,
 incidencias descargables, exportación Excel/CSV y comprobante con SHA-256.
 
-Antes de desplegar esta ampliación, aplica en la base correspondiente la
-migración **0064_material_master_profiles.sql** después de las anteriores.
-No se ejecuta automáticamente ni cambia productos o movimientos históricos.
+Para habilitar los 25 campos, aplica en la base correspondiente la migración
+**0064_material_master_profiles.sql** después de las anteriores. Hasta entonces,
+la API ofrece una plantilla compatible de nueve campos y exportación del maestro
+base; las cargas anteriores de seis columnas siguen funcionando. La API detecta
+la tabla adicional al consultar, sin exigir un reinicio después de la migración.
+No se ejecuta SQL automáticamente ni se cambian movimientos históricos.
 Consulta [flujos, límites y despliegue](docs/FLUJOS-Y-CARGA-DE-DATOS.md).
+
+`python scripts/material_schema.py` verifica la conexión y permisos sin imprimir
+secretos. `python scripts/material_schema.py --apply` usa
+`DATABASE_MIGRATION_URL`, cuando está configurada, y solo aplica la migración
+adicional al proyecto ERP esperado si dispone de permisos. La cuenta `erp_api`
+de operación no necesita recibir permisos DDL.
+
+## Módulos y acceso efectivo
+
+La interfaz ofrece accesos propios para Contabilidad, Aprobaciones, Flujo de caja,
+Disponibilidad/reservas y Valoración de referencia. Reutilizan las rutas actuales;
+estos accesos no necesitan nuevas tablas ni conceden permisos adicionales.
+
+`GET /api/v1/auth/access` devuelve el rol verificado, sus permisos actuales y la
+intersección de módulos de empresa, usuario y perfil comercial. Los códigos de
+rol y permisos del servidor se conservan. Deshabilitar un módulo de la empresa
+prevalece sobre una habilitación individual.
+
+`python scripts/verify_workspace.py` comprueba las consultas de esos módulos en
+una transacción de solo lectura. Las pruebas unitarias fuerzan una base aislada
+y deshabilitan integraciones externas incluso si existe un `.env` productivo.
 
 ### Ejecutar las pruebas
 

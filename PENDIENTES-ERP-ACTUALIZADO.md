@@ -143,8 +143,14 @@ Excel con diccionario/catálogos/ejemplo separado; errores por fila descargables
 exportación CSV/XLSX por tenant; hash de archivo, revalidación e idempotencia.
 Requiere la migración `0064_material_master_profiles.sql`. Se conserva la carga
 original de seis columnas. Ver `docs/FLUJOS-Y-CARGA-DE-DATOS.md`.
+La API conserva una plantilla/exportación base de nueve campos hasta aplicar
+esa migración. Se añadieron accesos propios para Contabilidad, Aprobaciones,
+Flujo de caja, Disponibilidad/reservas, Valoración y Guía. El menú consulta el
+acceso efectivo por rol, empresa y usuario, sin ampliar permisos del servidor.
+Las pruebas de navegador cubren los siete roles y la presentación móvil con
+datos aislados; las consultas SQL se verifican con una transacción de solo lectura.
 Siguen pendientes mapeos reutilizables, reversión de lotes confirmados, simulación
-contable completa, exportaciones pesadas y verificación visual autenticada.
+contable completa y exportaciones pesadas.
 
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de
   precios, condiciones de pago y políticas de descuento.

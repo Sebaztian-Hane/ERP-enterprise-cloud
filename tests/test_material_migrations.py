@@ -239,6 +239,26 @@ def test_data_routes_respect_a_disabled_product_module(migration_client, monkeyp
     assert db.scalar(select(Product)) is None
 
 
+def test_release_before_migration_preserves_core_imports_and_exports(migration_client):
+    client, db, _, _ = migration_client
+    # Deliberately simulate an older schema in this isolated SQLite database.
+    ProductMaterialProfile.__table__.drop(db.get_bind())
+    metadata = client.get("/api/v1/imports/templates")
+    assert metadata.status_code == 200
+    template = next(item for item in metadata.json() if item["module"] == "products")
+    assert len(template["columns"]) == 9
+    assert "barcode" not in template["columns"]
+    assert client.get("/api/v1/imports/products/template").status_code == 200
+    uploaded = client.post("/api/v1/imports/products/commit", files={"file": ("x.csv", csv_file([row()]))})
+    assert uploaded.status_code == 201
+    assert client.get("/api/v1/imports/products/export?format=xlsx").status_code == 200
+    profile_preview = client.post("/api/v1/imports/products/preview", files={"file": ("x.csv", csv_file([row(sku="MAT-002", barcode="000123")]))})
+    assert profile_preview.status_code == 200
+    assert profile_preview.json()["can_commit"] is False
+    product = db.scalar(select(Product))
+    assert client.get(f"/api/v1/products/{product.id}/material-profile").status_code == 404
+
+
 @pytest.mark.parametrize("role,assurance,expected", [("viewer", "aal2", 403), ("inventory", "aal2", 403), ("owner", "aal1", 403)])
 def test_bulk_commit_preserves_role_and_second_factor_guards(migration_client, role, assurance, expected):
     client, db, state, _ = migration_client
