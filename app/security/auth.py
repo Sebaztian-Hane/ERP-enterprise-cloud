@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting, UserSecurityState
+from app.services.enterprise_roles import extend_permissions
 
 
 class Actor(BaseModel):
@@ -188,6 +189,8 @@ PROFILE_BLOCKED_MODULES = {
     "wholesale": {"pos"},
     "hybrid": set(),
 }
+
+extend_permissions(ROLE_PERMISSIONS, PERMISSION_MODULES)
 
 
 def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:

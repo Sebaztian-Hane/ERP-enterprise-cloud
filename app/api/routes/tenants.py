@@ -9,13 +9,27 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.entities import AuditLog, Tenant, TenantMembership
 from app.schemas.common import AuditLogOut, MembershipCreate, MembershipInvite, MembershipOut, MembershipUpdate, TenantCreate, TenantOut
-from app.security.auth import Actor, get_user_id, require_permission, require_second_factor
+from app.security.auth import Actor, ROLE_PERMISSIONS, get_user_id, require_permission, require_second_factor
+from app.services.enterprise_roles import SPECIALIZED_ROLES
+from app.services.enterprise import available as enterprise_available
 from app.services.audit import record
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.supabase_admin import create_user
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
-VALID_ROLES = {"owner", "admin", "sales", "purchases", "inventory", "finance", "viewer"}
+VALID_ROLES = set(ROLE_PERMISSIONS)
+
+
+def ensure_role_available(role_code: str, db: Session):
+    if role_code in SPECIALIZED_ROLES and not enterprise_available(db):
+        raise HTTPException(status_code=422, detail="Activa la migración 0065 antes de asignar roles especializados")
+
+
+@router.get("/roles")
+def roles(actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    baseline = {"owner": "Propietario", "admin": "Administrador", "sales": "Ventas", "purchases": "Compras", "inventory": "Inventario", "finance": "Finanzas", "viewer": "Consulta"}
+    if enterprise_available(db): baseline.update({code: label for code, (label, _) in SPECIALIZED_ROLES.items()})
+    return [{"code": code, "label": label} for code, label in baseline.items()]
 
 
 def require_owner_role_change(actor: Actor, role_code: str) -> None:
@@ -65,6 +79,7 @@ def list_memberships(actor: Actor = Depends(require_permission("tenants:manage")
 def add_membership(request: Request, response: Response, data: MembershipCreate, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
+    ensure_role_available(data.role_code, db)
     require_owner_role_change(actor, data.role_code)
     membership = TenantMembership(tenant_id=actor.tenant_id, user_id=data.user_id, role_code=data.role_code)
     db.add(membership)
@@ -84,6 +99,7 @@ def add_membership(request: Request, response: Response, data: MembershipCreate,
 async def invite_member(request: Request, response: Response, data: MembershipInvite, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     if data.role_code not in VALID_ROLES:
         raise HTTPException(status_code=422, detail="Rol no válido")
+    ensure_role_available(data.role_code, db)
     require_owner_role_change(actor, data.role_code)
     settings = get_settings()
     if not settings.supabase_service_role_key:
@@ -125,6 +141,7 @@ def update_membership(request: Request, response: Response, membership_id: UUID,
     if data.role_code is not None:
         if data.role_code not in VALID_ROLES:
             raise HTTPException(status_code=422, detail="Rol no válido")
+        ensure_role_available(data.role_code, db)
         require_owner_role_change(actor, data.role_code)
     if membership.role_code == "owner" and actor.role_code != "owner":
         raise HTTPException(status_code=403, detail="Solo un propietario puede modificar otro propietario")

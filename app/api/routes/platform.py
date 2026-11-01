@@ -23,6 +23,8 @@ from app.services.apisunat_credentials import encrypt_persona_token
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.decolecta import DecolectaError, lookup_tax_id
 from app.services.module_catalog import MODULES
+from app.services.enterprise import ensure_ready as ensure_enterprise_ready
+from app.services.enterprise_roles import ADDITIONAL_MODULES
 
 
 router = APIRouter(prefix="/platform", tags=["platform"])
@@ -273,6 +275,8 @@ def get_module_access(tenant_id: UUID, _: PlatformActor = Depends(require_platfo
 def update_tenant_module(tenant_id: UUID, data: ModuleToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
     if data.module_code not in MODULE_CODES:
         raise HTTPException(status_code=422, detail="Módulo no válido")
+    if data.module_code in {code for code, _ in ADDITIONAL_MODULES}:
+        ensure_enterprise_ready(db)
     tenant = db.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
@@ -289,6 +293,8 @@ def update_tenant_module(tenant_id: UUID, data: ModuleToggle, actor: PlatformAct
 def update_member_module(tenant_id: UUID, membership_id: UUID, data: ModuleToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
     if data.module_code not in MODULE_CODES:
         raise HTTPException(status_code=422, detail="Módulo no válido")
+    if data.module_code in {code for code, _ in ADDITIONAL_MODULES}:
+        ensure_enterprise_ready(db)
     tenant = db.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")

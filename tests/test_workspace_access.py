@@ -9,6 +9,10 @@ from app.db.base import Base
 from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting
 from app.security.auth import Actor, ROLE_PERMISSIONS
 from app.services.workspace_access import workspace_access
+from app.services.enterprise_roles import ADDITIONAL_MODULES
+from app.security.auth import PlatformActor, module_is_enabled
+from app.api.routes import platform
+from app.schemas.common import ModuleToggle
 
 
 @pytest.fixture
@@ -36,12 +40,28 @@ def test_snapshot_returns_exact_existing_permissions_without_new_grants(access_d
     assert snapshot["role_code"] == role
 
 
-def test_member_override_cannot_enable_company_disabled_module(access_database):
+@pytest.mark.parametrize("module", ["inventory", *(code for code, _ in ADDITIONAL_MODULES)])
+def test_member_override_cannot_enable_company_disabled_module(access_database, module):
     _, actor, membership = member(access_database, "owner")
-    access_database.add(TenantModuleSetting(tenant_id=actor.tenant_id, module_code="inventory", is_enabled=False))
-    access_database.add(MembershipModuleSetting(tenant_id=actor.tenant_id, membership_id=membership.id, module_code="inventory", is_enabled=True))
+    access_database.add(TenantModuleSetting(tenant_id=actor.tenant_id, module_code=module, is_enabled=False))
+    access_database.add(MembershipModuleSetting(tenant_id=actor.tenant_id, membership_id=membership.id, module_code=module, is_enabled=True))
     access_database.commit()
-    assert workspace_access(actor, access_database)["modules"]["inventory"] is False
+    assert workspace_access(actor, access_database)["modules"][module] is False
+    assert module_is_enabled(access_database, actor, module) is False
+
+
+def test_provider_cannot_toggle_new_scopes_before_schema_activation(access_database):
+    tenant, actor, membership = member(access_database, "owner")
+    provider = PlatformActor(user_id=actor.user_id, email="provider@example.test")
+    data = ModuleToggle(module_code="hcm", is_enabled=False)
+    for command in (
+        lambda: platform.update_tenant_module(tenant.id, data, provider, access_database),
+        lambda: platform.update_member_module(tenant.id, membership.id, data, provider, access_database),
+    ):
+        with pytest.raises(HTTPException) as error:
+            command()
+        assert error.value.status_code == 503
+        assert "0065" in error.value.detail
 
 
 def test_user_restriction_cannot_leak_from_another_tenant(access_database):

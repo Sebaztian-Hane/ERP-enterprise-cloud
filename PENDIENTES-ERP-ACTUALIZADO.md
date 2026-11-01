@@ -20,6 +20,13 @@
 
 ## Entregado recientemente
 
+- [x] Suite con 14 áreas adicionales, 24 tipos de documento y 11 roles
+  especializados: formularios, persistencia, referencias, estados e historial.
+  **Activación de producción pendiente:** ejecutar `0065_enterprise_modules.sql`.
+- [x] Conservación de tildes/ñ en HTTP y persistencia, comprobada con pruebas;
+  guardas de codificación UTF-8 en backend y compilación del frontend.
+- [ ] Activar 0065 y comprobar RLS, bloqueos concurrentes y flujos de la suite
+  contra PostgreSQL. La conexión `erp_api` actual no permite DDL.
 - [x] Expediente CPE privado: respuesta del proveedor, XML, CDR y PDF, hash
   SHA-256, tamaño, contenido y fecha de captura.
 - [x] Trazabilidad append-only de reserva, envío, consulta, anulación e
@@ -63,8 +70,10 @@
 - [ ] Implementar nota de crédito y débito CPE vinculada al comprobante
   aceptado. Requiere la plantilla/contrato APISUNAT para referencia al CPE
   origen y discrepancia; no inferir el JSON.
-- [ ] Añadir solicitud de compra, cuadro comparativo y aprobación previa a la
-  orden de compra.
+- [x] Solicitud de compra, ofertas de proveedores y aprobación previa a la
+  orden; cierre con orden relacionada (requiere activación 0065).
+- [ ] Cuadro comparativo con homologación de moneda, impuestos, costo logístico
+  y criterios ponderados; integración automática de oferta seleccionada a OC.
 - [ ] Implementar validación de tres vías: orden ↔ recepción ↔ factura del
   proveedor.
 - [ ] Incorporar devoluciones parciales y tolerancias configurables de

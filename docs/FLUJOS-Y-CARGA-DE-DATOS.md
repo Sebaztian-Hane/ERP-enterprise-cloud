@@ -189,3 +189,81 @@ trabajo todavía abierto; esta entrega no marca esos recorridos como completos.
 Referencia de experiencia: [SAP S/4HANA Migration Cockpit](https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE/29193bf0ebdd4583930b2176cb993268/2f0dbe4111214bcf9b2d57eca26f0525.html).
 Se adopta la secuencia de preparación y revisión, con una implementación
 propia y los límites funcionales descritos arriba.
+
+## Suite empresarial: 14 áreas nuevas y 24 transacciones
+
+El panel pasa de 29 a 43 accesos. FI (Contabilidad) y DMS (Documentos) conservan
+sus pantallas actuales. Las nuevas áreas tienen formularios, referencias,
+persistencia, estados e historial; no son accesos a una pantalla de propuesta.
+
+| Área / acceso | Transacciones y recorrido |
+| --- | --- |
+| HCM / `#hcm` | Empleado: borrador → activación independiente → inactivo; ausencias: solicitud → revisión → aprobación/rechazo → cierre; jornada: registro diario → revisión → aprobación/rechazo |
+| SD / `#sd` | Acuerdo comercial: cliente y condiciones → activación → cierre. Enlaces al flujo existente de cotización, pedido y venta |
+| MM / `#mm` | Solicitud de compra → revisión → aprobación → cierre con orden relacionada; ofertas de proveedor → selección independiente o rechazo |
+| PP / `#pp` | Lista de materiales → activación; orden de producción → liberación con cálculo de necesidades → ejecución → cierre con cantidad fabricada |
+| PM / `#pm` | Equipos → activación; avisos → atención → resolución → cierre; órdenes de mantenimiento → liberación → ejecución → cierre con horas y resultado |
+| QM / `#qm` | Inspección → ejecución → cierre con cantidades aceptadas/rechazadas reconciliadas; no conformidad → acción correctiva → resolución → cierre |
+| WM / `#wm` | Tarea de ubicación, preparación o movimiento interno → asignación → cierre con resultado |
+| TM / `#tm` | Vehículo → activación; orden de transporte → liberación → ejecución → cierre; viaje → despacho con validación de capacidad/disponibilidad → entrega con evidencia |
+| PS / `#ps` | Proyecto → liberación → ejecución → cierre; tareas → ejecución → 100% de avance → cierre. Un proyecto no cierra con tareas pendientes |
+| CO / `#co` | Presupuesto por centro de costo/período → revisión → aprobación independiente → cierre |
+| AA / `#aa` | Activo y custodio → activación independiente → baja autorizada con motivo |
+| CRM / `#crm` | Oportunidad → calificación → propuesta → ganada o perdida con motivo |
+| EHS / `#ehs` | Incidente → investigación/acción correctiva → resolución → cierre |
+| CS / `#cs` | Solicitud de cliente → atención → resolución documentada → cierre |
+
+Los documentos usan `enterprise_records` y los eventos `enterprise_record_events`.
+Cada escritura y evento se confirman juntos. La versión evita sobrescribir un
+cambio concurrente; los comandos admiten `Idempotency-Key`. Las referencias se
+validan en la misma empresa. El hash acredita el contenido de cada versión; el
+historial conserva actor, fecha, transición y motivo, sin editar eventos previos.
+
+La aprobación requiere permiso, segundo factor y una persona distinta del
+creador. Se agregan 11 roles especializados: `hr`, `maintenance`, `transport`,
+`production`, `quality`, `projects`, `controller`, `assets`, `crm`, `safety`,
+`service`. Los siete roles anteriores conservan sus códigos y permisos previos;
+los nuevos ámbitos complementan sus responsabilidades. `viewer` no recibe HCM
+ni EHS. Empresa/miembro pueden restringir cada ámbito desde la consola del
+proveedor. Los datos laborales no se incorporan al índice del asistente ni a
+su sincronización externa; las especialidades reciben únicamente la guía.
+
+### Activación manual de Supabase
+
+1. Abrir el proyecto ERP `tufvaozdbbhdiiyrxtlh` en el editor SQL de Supabase.
+2. Ejecutar una vez el archivo completo
+   `D:\ERP_ZAMBRANO\ERP-enterprise-cloud\alembic\versions\0065_enterprise_modules.sql`.
+   Incluye transacción, roles, permisos, ámbitos configurables, dos tablas,
+   índices de exclusividad operativa, RLS y protección del historial. No elimina
+   datos ni tablas existentes. Requiere la cuenta propietaria de los esquemas.
+3. Verificar desde el backend con
+   `.venv\Scripts\python.exe -X utf8 scripts/enterprise_schema.py`.
+   Deben aparecer ambas tablas, RLS e historial protegido y 11/11 roles.
+4. En la web abrir Aplicaciones → área → Actualizar. No hace falta reiniciar
+   la API. Si la migración falta, la pantalla muestra el requisito y bloquea
+   nuevas escrituras; no anuncia un registro inexistente.
+5. En Administración asignar las especialidades a usuarios autorizados. Usar
+   dos usuarios y segundo factor para probar una aprobación en la empresa de
+   evaluación. Los cambios de acceso de otras empresas siguen aislados.
+
+La migración 0064 de materiales ya está aplicada en el proyecto conectado;
+esta activación nueva corresponde únicamente a 0065. Si se dispone de una
+conexión administrativa privada `DATABASE_MIGRATION_URL`, el mismo script con
+`--apply` valida el proyecto y los permisos antes de ejecutar el archivo.
+
+### Límites funcionales y comprobación
+
+Son operaciones documentales de planificación/control. PP no contabiliza
+automáticamente consumos ni producción; WM/TM no duplican movimientos de stock;
+HCM no calcula nómina ni saldos legales; AA no calcula depreciación fiscal; CO
+no genera pagos. Stock, CPE, pagos y asientos conservan sus comandos actuales.
+No hay MRP multinivel automático ni integración completa de todos esos cierres.
+La pantalla de cada transacción indica el alcance concreto.
+
+La regresión local comprueba las 24 altas/consultas, Unicode de extremo a
+extremo, separación de empresas, roles, cambios de estado, versiones, rollback,
+segregación/MFA, fórmulas PP, capacidad de vehículos, jornadas duplicadas,
+ausencias superpuestas y cierres PS/QM. El navegador comprueba los 18 roles,
+panel de áreas, registro PM, historial y móvil. PostgreSQL/RLS/concurrencia
+requieren una comprobación adicional después de activar 0065; SQLite no los
+certifica. La compilación rechaza UTF-8 inválido o textos con tildes dañadas.

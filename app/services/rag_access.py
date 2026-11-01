@@ -8,6 +8,7 @@ defence, but it must never be the only place where authorization is decided.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from app.services.enterprise_roles import SPECIALIZED_ROLES
 
 
 @dataclass(frozen=True)
@@ -47,11 +48,13 @@ _SCOPES: dict[str, AssistantScope] = {
         ("erp_guide", "product_catalog", "inventory_stock", "customer", "supplier", "warehouse", "sale", "purchase", "receivable", "payable", "report"),
     ),
 }
+_SCOPES.update({role: AssistantScope(label, ("guide", module), ("erp_guide",)) for role, (label, module) in SPECIALIZED_ROLES.items()})
 
 # The phrases represent data domains, not just navigation labels. A match is
 # intentionally conservative: mixed requests are denied as a whole, so the
 # model cannot answer the restricted half by accident.
 _TOPIC_PATTERNS: dict[str, tuple[str, ...]] = {
+    "hcm": ("recursos humanos", "empleado", "vacaciones", "nómina", "nomina", "salario"),
     "inventory": ("inventari", "stock", "existencias", "kardex", "lote", "serie", "movimiento de almac", "movimiento de stock", "movimiento de inventari", "ajuste de inventari", "reserva de stock"),
     "warehouses": ("almacén", "almacen", "transferencia entre almac"),
     "purchases": ("compra", "orden de compra", "proveedor"),
@@ -65,6 +68,7 @@ _TOPIC_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 _TOPIC_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "hcm": ("hcm",),
     "inventory": ("inventory",), "warehouses": ("warehouses", "inventory"),
     "purchases": ("purchases",), "suppliers": ("suppliers", "purchases"),
     "sales": ("sales",), "customers": ("customers", "sales"),

@@ -118,6 +118,13 @@ La ruta `/oreo` es la entrada de la consola de gestión global de empresas. No e
 
 ## Operación, monitoreo y recuperación
 
+La suite HCM/SD/MM/PP/PM/QM/WM/TM/PS/CO/AA/CRM/EHS/CS agrega 24 tipos de
+documento y 11 roles especializados. Aplicar una vez
+`alembic/versions/0065_enterprise_modules.sql` con administración de Supabase;
+verificar con `python -X utf8 scripts/enterprise_schema.py`. Sin las tablas,
+la API informa la activación pendiente y conserva los procesos anteriores.
+Recorridos y límites: [Flujos y carga de datos](docs/FLUJOS-Y-CARGA-DE-DATOS.md).
+
 - Configura Render para supervisar `/ready`: devuelve `200` solo si la API puede conectarse a PostgreSQL; un error de base de datos devuelve `503`.
 - Revisa los logs de Render después de cada despliegue y usa `/health` para comprobar que el proceso está vivo, y `/ready` para comprobar que está listo para recibir tráfico.
 - Antes de operar con datos reales, establece en Supabase una política de respaldos compatible con tu plan. Conserva copias lógicas cifradas fuera de la aplicación y prueba una restauración en una base de datos de prueba de forma periódica.
