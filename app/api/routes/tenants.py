@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import AuditLog, Tenant, TenantMembership
+from app.models.entities import AuditLog, Tenant, TenantMembership, TenantModuleSetting, MembershipModuleSetting
 from app.schemas.common import AuditLogOut, MembershipCreate, MembershipInvite, MembershipOut, MembershipUpdate, TenantCreate, TenantOut
 from app.security.auth import Actor, ROLE_PERMISSIONS, get_user_id, require_permission, require_second_factor
 from app.services.enterprise_roles import SPECIALIZED_ROLES
@@ -15,9 +15,49 @@ from app.services.enterprise import available as enterprise_available
 from app.services.audit import record
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.supabase_admin import create_user
+from app.services.module_catalog import MODULES
+from app.services.module_hierarchy import MODULE_GROUPS
+from app.security.auth import PROFILE_BLOCKED_MODULES
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 VALID_ROLES = set(ROLE_PERMISSIONS)
+
+
+class MemberModuleAccess(BaseModel):
+    modules: dict[str, bool] = Field(min_length=1, max_length=64)
+
+
+@router.get("/module-access")
+def module_access(actor: Actor = Depends(require_permission("tenants:manage")), db: Session = Depends(get_db)):
+    tenant = db.get(Tenant, actor.tenant_id)
+    blocked = PROFILE_BLOCKED_MODULES.get(tenant.business_profile, set())
+    company = {item.module_code: item.is_enabled for item in db.scalars(select(TenantModuleSetting).where(TenantModuleSetting.tenant_id == actor.tenant_id))}
+    members = db.scalars(select(TenantMembership).where(TenantMembership.tenant_id == actor.tenant_id)).all()
+    overrides = {}
+    for item in db.scalars(select(MembershipModuleSetting).where(MembershipModuleSetting.tenant_id == actor.tenant_id)):
+        overrides.setdefault(str(item.membership_id), {})[item.module_code] = item.is_enabled
+    return {"groups": MODULE_GROUPS, "modules": [{"code": code, "label": label, "is_available": code not in blocked, "is_enabled": code not in blocked and company.get(code, True)} for code, label in MODULES], "members": [{"id": str(item.id), "role_code": item.role_code, "overrides": overrides.get(str(item.id), {})} for item in members]}
+
+
+@router.patch("/memberships/{membership_id}/module-access")
+def update_member_access(membership_id: UUID, data: MemberModuleAccess, actor: Actor = Depends(require_permission("tenants:manage")), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+    membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == actor.tenant_id))
+    if not membership:
+        raise HTTPException(status_code=404, detail="Membresía no encontrada")
+    if set(data.modules) - {code for code, _ in MODULES}:
+        raise HTTPException(status_code=422, detail="Módulo no válido")
+    if membership.role_code == "owner" and data.modules.get("administration") is False:
+        raise HTTPException(status_code=422, detail="El propietario debe conservar el acceso a Administración")
+    for code, enabled in data.modules.items():
+        setting = db.scalar(select(MembershipModuleSetting).where(MembershipModuleSetting.tenant_id == actor.tenant_id, MembershipModuleSetting.membership_id == membership_id, MembershipModuleSetting.module_code == code))
+        if setting:
+            setting.is_enabled = enabled
+        else:
+            db.add(MembershipModuleSetting(tenant_id=actor.tenant_id, membership_id=membership_id, module_code=code, is_enabled=enabled))
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update_member_modules", module="tenants", entity="tenant_membership", entity_id=membership_id, detail=",".join(f"{code}={enabled}" for code, enabled in sorted(data.modules.items())))
+    db.commit()
+    return {"id": str(membership_id), "modules": data.modules}
 
 
 def ensure_role_available(role_code: str, db: Session):

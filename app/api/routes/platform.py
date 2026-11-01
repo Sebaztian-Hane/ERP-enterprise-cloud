@@ -23,12 +23,58 @@ from app.services.apisunat_credentials import encrypt_persona_token
 from app.services.brevo import invitation_html, send_brevo_email
 from app.services.decolecta import DecolectaError, lookup_tax_id
 from app.services.module_catalog import MODULES
+from app.services.module_hierarchy import MODULE_GROUPS
+from pydantic import BaseModel, Field
 from app.services.enterprise import ensure_ready as ensure_enterprise_ready
 from app.services.enterprise_roles import ADDITIONAL_MODULES
 
 
 router = APIRouter(prefix="/platform", tags=["platform"])
 MODULE_CODES = {code for code, _ in MODULES}
+
+
+class ModuleBatchToggle(BaseModel):
+    modules: dict[str, bool] = Field(min_length=1, max_length=64)
+
+
+def _toggle_module_batch(tenant_id, changes, actor, db, membership_id=None):
+    if set(changes) - MODULE_CODES:
+        raise HTTPException(status_code=422, detail="Módulo no válido")
+    tenant = db.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    if any(enabled and code in PROFILE_BLOCKED_MODULES[tenant.business_profile] for code, enabled in changes.items()):
+        raise HTTPException(status_code=422, detail="Un módulo no corresponde al perfil operativo de la empresa")
+    if set(changes) & {code for code, _ in ADDITIONAL_MODULES}:
+        ensure_enterprise_ready(db)
+    if membership_id:
+        membership = db.scalar(select(TenantMembership).where(TenantMembership.id == membership_id, TenantMembership.tenant_id == tenant_id))
+        if not membership:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado en esta empresa")
+        if membership.role_code == "owner" and changes.get("administration") is False:
+            raise HTTPException(status_code=422, detail="El propietario debe conservar el acceso a Administración")
+    for code, enabled in changes.items():
+        if membership_id:
+            setting = db.scalar(select(MembershipModuleSetting).where(MembershipModuleSetting.tenant_id == tenant_id, MembershipModuleSetting.membership_id == membership_id, MembershipModuleSetting.module_code == code))
+            if setting: setting.is_enabled = enabled
+            else: db.add(MembershipModuleSetting(tenant_id=tenant_id, membership_id=membership_id, module_code=code, is_enabled=enabled))
+        else:
+            setting = db.get(TenantModuleSetting, {"tenant_id": tenant_id, "module_code": code})
+            if setting: setting.is_enabled = enabled
+            else: db.add(TenantModuleSetting(tenant_id=tenant_id, module_code=code, is_enabled=enabled))
+    record(db, tenant_id=tenant_id, actor_user_id=actor.user_id, action="platform_module_batch", module="platform", entity="membership_module" if membership_id else "tenant_module", entity_id=membership_id, detail=",".join(f"{code}={enabled}" for code, enabled in sorted(changes.items())))
+    db.commit()
+    return {"modules": changes}
+
+
+@router.patch("/tenants/{tenant_id}/modules/batch")
+def update_tenant_modules(tenant_id: UUID, data: ModuleBatchToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
+    return _toggle_module_batch(tenant_id, data.modules, actor, db)
+
+
+@router.patch("/tenants/{tenant_id}/members/{membership_id}/modules/batch")
+def update_member_modules(tenant_id: UUID, membership_id: UUID, data: ModuleBatchToggle, actor: PlatformActor = Depends(require_platform_admin), db: Session = Depends(get_db)):
+    return _toggle_module_batch(tenant_id, data.modules, actor, db, membership_id)
 PROFILE_BLOCKED_MODULES = {
     "retail": {"quotes", "sales_orders"},
     "wholesale": {"pos"},
@@ -266,6 +312,7 @@ def get_module_access(tenant_id: UUID, _: PlatformActor = Depends(require_platfo
         by_member.setdefault(str(setting.membership_id), {})[setting.module_code] = setting.is_enabled
     return {
         "business_profile": tenant.business_profile,
+        "groups": MODULE_GROUPS,
         "modules": [{"code": code, "label": label, "is_available": code not in PROFILE_BLOCKED_MODULES[tenant.business_profile], "is_enabled": tenant_settings.get(code, True) and code not in PROFILE_BLOCKED_MODULES[tenant.business_profile]} for code, label in MODULES],
         "members": [{"id": str(member.id), "user_id": str(member.user_id), "role_code": member.role_code, "is_active": member.is_active, "overrides": by_member.get(str(member.id), {})} for member in members],
     }

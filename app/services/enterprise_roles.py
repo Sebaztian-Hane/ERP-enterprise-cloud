@@ -25,8 +25,7 @@ def extend_permissions(permissions, modules):
     permissions.update({role: set(grants) for role, grants in ADDITIONAL_PERMISSIONS.items()})
     # New namespaces follow the responsibilities of existing job roles; no
     # existing financial, stock, security or fiscal permission is broadened.
-    permissions["sales"].update({"crm:read", "crm:write", "service:read"})
-    permissions["finance"].update({"controlling:read", "controlling:write", "assets:read", "assets:write"})
-    permissions["inventory"].update({"production:read", "maintenance:read", "transport:read", "quality:read"})
+    # A specialty is assigned through its own role; sharing a business process
+    # does not grant access to another department's registers or workspaces.
     permissions["viewer"].update({f"{code}:read" for _, code in SPECIALIZED_ROLES.values() if code not in {"hcm", "safety"}})
     for _, code in SPECIALIZED_ROLES.values(): modules[code] = code

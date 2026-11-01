@@ -169,7 +169,7 @@ def require_second_factor(actor: Actor = Depends(get_actor)) -> Actor:
 ROLE_PERMISSIONS = {
     "owner": {"*"}, "admin": {"*"}, "sales": {"customers:read", "customers:write", "products:read", "sales:read", "sales:write", "electronic_billing:read", "electronic_billing:write", "documents:read", "documents:write"},
     "purchases": {"suppliers:read", "suppliers:write", "products:read", "purchases:read", "purchases:write"},
-    "finance": {"payments:read", "payments:write", "accounts:read", "sales:read", "purchases:read", "reports:read", "documents:read", "documents:write", "treasury:read", "treasury:write", "accounting:read", "accounting:write", "approvals:read"},
+    "finance": {"payments:read", "payments:write", "accounts:read", "reports:read", "documents:read", "documents:write", "treasury:read", "treasury:write", "accounting:read", "accounting:write", "approvals:read"},
     "inventory": {"products:read", "products:write", "inventory:read", "inventory:write"},
     "viewer": {"customers:read", "products:read", "suppliers:read", "inventory:read", "sales:read", "purchases:read", "payments:read", "accounts:read", "reports:read", "documents:read", "accounting:read"},
 }
@@ -194,6 +194,10 @@ extend_permissions(ROLE_PERMISSIONS, PERMISSION_MODULES)
 
 
 def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
+    from app.services.module_hierarchy import MODULE_PARENTS
+    parent = MODULE_PARENTS.get(module_code)
+    if parent and not module_is_enabled(db, actor, parent):
+        return False
     tenant = db.get(Tenant, actor.tenant_id)
     if not tenant or module_code in PROFILE_BLOCKED_MODULES.get(tenant.business_profile, set()):
         return False
@@ -203,9 +207,10 @@ def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
     membership = db.scalar(select(TenantMembership).where(
         TenantMembership.tenant_id == actor.tenant_id, TenantMembership.user_id == actor.user_id,
     ))
-    if not membership:
+    if not membership or not membership.is_active:
         return False
     member_setting = db.scalar(select(MembershipModuleSetting).where(
+        MembershipModuleSetting.tenant_id == actor.tenant_id,
         MembershipModuleSetting.membership_id == membership.id,
         MembershipModuleSetting.module_code == module_code,
     ))
@@ -214,10 +219,16 @@ def module_is_enabled(db: Session, actor: Actor, module_code: str) -> bool:
 
 def require_permission(permission: str, module_code: str | None = None):
     def check(actor: Actor = Depends(get_actor), db: Session = Depends(get_db)) -> Actor:
+        from app.services.module_hierarchy import ROLE_WORKSPACES
+        if permission.split(":", 1)[0] in {"tenants", "configuration"} and actor.role_code != "owner":
+            raise HTTPException(status_code=403, detail="La administración y configuración corresponden al propietario")
         granted = ROLE_PERMISSIONS.get(actor.role_code, set())
         if "*" not in granted and permission not in granted:
             raise HTTPException(status_code=403, detail="No tiene permiso para esta operación")
         effective_module_code = module_code or PERMISSION_MODULES.get(permission.split(":", 1)[0])
+        workspace = ROLE_WORKSPACES.get(actor.role_code)
+        if workspace and hasattr(db, "get") and not module_is_enabled(db, actor, workspace):
+            raise HTTPException(status_code=403, detail="El módulo de su rol no está habilitado para su acceso")
         # Direct unit calls exercise role semantics without FastAPI resolving
         # dependency objects. Real requests always receive a Session here.
         if effective_module_code and hasattr(db, "get") and not module_is_enabled(db, actor, effective_module_code):
@@ -257,8 +268,12 @@ def require_module(module_code: str):
     return check
 
 
-def require_owner_or_admin(actor: Actor = Depends(get_actor)) -> Actor:
-    """Protect bulk migrations independently from each module's write permission."""
-    if actor.role_code not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo el propietario o un administrador puede migrar datos")
+def require_owner(actor: Actor = Depends(get_actor)) -> Actor:
+    """Governance and bulk migration belong to the tenant owner."""
+    if actor.role_code != "owner":
+        raise HTTPException(status_code=403, detail="Solo el propietario puede administrar o migrar datos")
     return actor
+
+
+# Compatibility for callers imported before the owner-only governance policy.
+require_owner_or_admin = require_owner

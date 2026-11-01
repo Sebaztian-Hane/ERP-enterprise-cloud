@@ -132,3 +132,28 @@ Recorridos y límites: [Flujos y carga de datos](docs/FLUJOS-Y-CARGA-DE-DATOS.md
 - Antes de operar con datos reales, establece en Supabase una política de respaldos compatible con tu plan. Conserva copias lógicas cifradas fuera de la aplicación y prueba una restauración en una base de datos de prueba de forma periódica.
 - Documenta y ensaya la recuperación: crear una base de prueba, restaurar el respaldo, verificar los tenants, usuarios, ventas e inventario y sólo entonces autorizar una recuperación de producción.
 - Las credenciales de base de datos, claves de servicio y respaldos no se guardan en el repositorio ni en variables públicas del frontend.
+
+## Jerarquía de módulos y gobierno de accesos
+
+`app/services/module_hierarchy.py` agrupa los códigos existentes en SD, MM, WM,
+FI y las especialidades empresariales. Deshabilitar SD bloquea también clientes,
+cotizaciones, pedidos y POS; MM bloquea proveedores y órdenes de compra. Los
+materiales siguen compartidos por los roles autorizados. Si se deshabilita el
+módulo principal de un rol operativo, también se bloquean sus consultas de soporte.
+
+Usuarios, roles, configuración y migraciones quedan reservados a `owner`.
+`admin` representa administración operativa y no concede gobierno de la empresa.
+Los roles especializados no se heredan desde Ventas, Inventario ni Finanzas.
+La consola global sigue exigiendo una identidad verificada en `PLATFORM_ADMIN_EMAILS`;
+ser propietario de una empresa no convierte al usuario en proveedor global.
+
+- `GET /api/v1/tenants/module-access`: grupos, habilitación de empresa y restricciones por miembro; solo propietario.
+- `PATCH /api/v1/tenants/memberships/{id}/module-access`: `{"modules":{"quotes":false}}`; propietario con segundo factor, validación de empresa y escritura atómica auditada.
+- `PATCH /api/v1/platform/tenants/{id}/modules/batch` y `/members/{membership_id}/modules/batch`: mismo formato para el proveedor autorizado; validación completa antes de guardar.
+- `GET /api/v1/accounts/counterparts/customers` y `/suppliers`: referencias de cartera para FI, limitadas a identificador y nombre de la empresa activa.
+
+Una habilitación por usuario nunca amplía los permisos del rol, el perfil de negocio
+ni la habilitación de la empresa. No se necesita una migración SQL adicional:
+se reutilizan `tenant_module_settings` y `membership_module_settings`.
+Las pruebas de aislamiento, jerarquía y escrituras atómicas están en
+`tests/test_workspace_hierarchy.py`.

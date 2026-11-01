@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.entities import MembershipModuleSetting, Tenant, TenantMembership, TenantModuleSetting
 from app.security.auth import Actor, PROFILE_BLOCKED_MODULES, ROLE_PERMISSIONS
 from app.services.module_catalog import MODULES
+from app.services.module_hierarchy import entitlement_enabled
 
 
 def workspace_access(actor: Actor, db: Session) -> dict:
@@ -20,5 +21,5 @@ def workspace_access(actor: Actor, db: Session) -> dict:
     return {
         "role_code": actor.role_code,
         "permissions": sorted(ROLE_PERMISSIONS.get(actor.role_code, set())),
-        "modules": {code: code not in blocked and company.get(code, True) and personal.get(code, True) for code, _ in MODULES},
+        "modules": {code: entitlement_enabled(code, company, personal, blocked) for code, _ in MODULES},
     }

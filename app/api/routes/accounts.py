@@ -2,12 +2,22 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import AccountPayable, AccountReceivable
+from app.models.entities import AccountPayable, AccountReceivable, Customer, Supplier
 from app.schemas.accounts import AccountPayableOut, AccountReceivableOut
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
+
+
+@router.get("/counterparts/{kind}")
+def counterpart_names(kind: str, actor: Actor = Depends(require_permission("accounts:read")), db: Session = Depends(get_db)):
+    from fastapi import HTTPException
+    model = {"customers": Customer, "suppliers": Supplier}.get(kind)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Tipo de contraparte no encontrado")
+    # FI needs identifiers and display names, not access to SD/MM master data.
+    return [{"id": str(identifier), "name": name} for identifier, name in db.execute(select(model.id, model.name).where(model.tenant_id == actor.tenant_id).order_by(model.name))]
 
 
 @router.get("/receivable")
