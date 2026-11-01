@@ -16,7 +16,9 @@ La API queda disponible en `/docs`; el chequeo básico en `/health` y el de disp
 
 ## Carga y exportación de materiales
 
-El botón Migrar y el nuevo Centro de datos comparten el contrato del backend.
+La carga masiva se realiza en el **Centro de migraciones**, con grupos por
+módulos habilitados, acciones desplegables, simulación conjunta y confirmación
+atómica. Consulta [el README paso a paso](docs/README-MIGRACIONES.md).
 La plantilla de materiales 2.0 ofrece 25 campos, conserva las cargas anteriores
 de seis columnas y separa el maestro de las existencias. Incluye validación,
 incidencias descargables, exportación Excel/CSV y comprobante con SHA-256.

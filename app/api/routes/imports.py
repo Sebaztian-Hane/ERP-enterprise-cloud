@@ -536,7 +536,16 @@ async def _preview(module: str, upload: UploadFile, actor: Actor, db: Session) -
 
 @router.get("/templates")
 def list_templates(actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
-    return [{"module": module, **(supported_material_template(template, db) if module == "products" else template), "download_url": f"/imports/{module}/template", "export_url": "/imports/products/export" if module == "products" else None} for module, template in TEMPLATES.items()]
+    result = []
+    for module, template in TEMPLATES.items():
+        try:
+            _ensure_import_permission(module, actor, db)
+            _ensure_import_module_allowed(module, actor, db)
+        except HTTPException as error:
+            if error.status_code == 403: continue
+            raise
+        result.append({"module": module, **(supported_material_template(template, db) if module == "products" else template), "download_url": f"/imports/{module}/template", "export_url": "/imports/products/export" if module == "products" else None})
+    return result
 
 
 @router.get("/{module}/template")

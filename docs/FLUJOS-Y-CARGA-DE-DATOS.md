@@ -63,7 +63,7 @@ sí sola.
 | Reportes / dashboard | Datos de los módulos y filtros de empresa/período | Indicadores con origen y criterios reproducibles |
 | Administración / perfil | Membresías, roles, módulos y sesión | Acceso autorizado con segundo factor cuando corresponde |
 | Asistente | Contexto autorizado → consulta asistida | Respuesta acotada; no ejecuta operaciones financieras |
-| Centro de datos | Plantilla → validación → confirmación → comprobación | Altas/exportación controladas con incidencias y hash |
+| Centro de migraciones | Grupo → archivos → simulación → confirmación | Altas/exportación controladas con incidencias y hash |
 
 Estos criterios son el diseño de operación y revisión. No certifican que cada
 recorrido esté completo en producción. Las rutas existentes de conversión,
@@ -72,8 +72,9 @@ recepción, entrega, devolución, pagos y aprobación se conservan.
 ## Materiales: contrato de plantilla 2.0
 
 El backend es la fuente de definición de columnas. El cliente la consulta en
-`GET /api/v1/imports/templates`; el botón Migrar existente y Centro de datos
-usan `DataMigrationPanel` y las mismas rutas `preview`/`commit`.
+`GET /api/v1/migration-projects/catalog`. La carga se centraliza en grupos.
+Consulta [README-MIGRACIONES](README-MIGRACIONES.md) para el flujo vigente;
+las rutas individuales `imports/*` se conservan por compatibilidad de API.
 
 Las seis columnas de la plantilla original siguen siendo válidas: `sku`,
 `name`, `category`, `unit`, `sale_price`, `average_cost`. Los valores de SKU y
@@ -98,24 +99,11 @@ MRP ni generan pedidos. Elegir un método de costo no certifica su valoración.
 
 ### Preparación y carga
 
-1. Configurar unidades activas. `unit`, `unidad` y `un` se aceptan como alias de
-   `NIU`; los códigos se resuelven sin distinguir mayúsculas dentro del tenant.
-2. Descargar Excel o CSV. Excel contiene `Plantilla`, `Instrucciones`,
-   `Diccionario`, `Ejemplo`, `Catalogos`. La hoja de carga está vacía; el ejemplo
-   está separado y no se importa. Los catálogos corresponden a la empresa.
-3. Completar hasta 2000 filas / 5 MB. Usar valores, sin fórmulas; códigos de
-   barras y partidas se conservan como texto. Se aceptan CSV UTF-8 con coma,
-   punto y coma o tabulador. Los decimales admiten punto o coma como separador.
-4. Validar sin guardar. Se detectan encabezados duplicados/desconocidos,
-   campos inválidos, duplicados de SKU, precios/costos no finitos o negativos,
-   unidades ajenas/inactivas, pesos incoherentes y referencias existentes.
-5. Revisar muestra normalizada y descargar todas las incidencias. Corregir y
-   volver a validar si hay errores. La vista previa devuelve SHA-256 del archivo.
-6. Confirmar con propietario/administrador y segundo factor. El commit compara
-   el digest cuando se envía, revalida, conserva idempotencia y guarda todo en
-   una transacción. Un error revierte el lote. La auditoría incluye hash y versión.
-7. Conservar el comprobante y revisar Productos. Cargar existencias por separado
-   con almacén y motivo. El perfil industrial también se edita desde Productos.
+Sigue [el README del Centro de migraciones](README-MIGRACIONES.md): crear grupo,
+descargar plantillas, cargar archivos o ZIP, simular y confirmar el conjunto.
+Las unidades activas se pueden preparar en el mismo grupo. Materiales y
+existencias son objetos distintos relacionados por SKU. La simulación conjunta
+reemplaza la validación manual independiente por módulo.
 
 Las cargas son **solo altas**. Un SKU existente genera conflicto; reimportar
 una exportación no actualiza ni reemplaza materiales existentes. No hay una
@@ -144,9 +132,9 @@ Excel si se necesita conservar literalmente un texto que empieza por `=`,
    no puede referenciar un producto de B ni consultarse por su UUID desde B.
 4. Desplegar primero migración y API; comprobar `/health` y `/ready`, descargar
    plantilla, validar/cargar un material de prueba y exportarlo.
-5. Desplegar frontend. Confirmar ambos accesos: botón Migrar y Centro de datos.
-   La interfaz sigue aceptando el contrato de la API anterior si esta aún no
-   anuncia descargas/exportación nuevas.
+5. Desplegar frontend. Confirmar el acceso exclusivo desde Centro de migraciones,
+   sus grupos y los menús de cada objeto. Verificar también 0065 y 0066 para
+   disponer de los documentos empresariales y las tablas de preparación.
 6. Verificar carga errónea sin filas persistidas, rechazo sin segundo factor,
    reintento idempotente y catálogo de otro tenant sin filtraciones.
 

@@ -37,12 +37,13 @@ def workbook_bytes(template: dict, *, rows: list[list[Any]] | None = None, catal
     for row in [
         ["PLANTILLA", template["label"]],
         ["Versión", template.get("version", "1.0")],
-        ["1. Preparar", "Completa Plantilla. Consulta Ejemplo, Diccionario y Catálogos. El ejemplo no se importa."],
-        ["2. Validar", "Carga el archivo en la web. Revisa errores y muestra antes de confirmar."],
-        ["3. Confirmar", "Se vuelve a validar y se guarda todo en una sola transacción. Máximo 2000 filas / 5 MB."],
-        ["4. Verificar", "Revisa el catálogo y conserva el comprobante de carga con su hash SHA-256."],
+        ["Preparación", "Completa Plantilla. Consulta Ejemplo y Diccionario. El ejemplo separado no se importa."],
+        ["Lugar de carga", "Centro de migraciones: crea un grupo y usa Acciones > Cargar archivo junto al objeto correspondiente."],
+        ["Simulación", "Simular grupo revisa todos los archivos y referencias en secuencia. No deja registros empresariales."],
+        ["Confirmación", "Revisa el resumen y marca el check final. El grupo se guarda completo o se revierte completo. Máximo 2000 filas por grupo / 5 MB por archivo."],
+        ["Verificación", "Revisa los módulos y conserva el comprobante del grupo con su hash SHA-256."],
         ["Modo de carga", "Solo altas; un código existente genera conflicto. La exportación sirve para revisión, no para sobrescribir datos."],
-        ["Existencias", "El maestro de materiales no carga stock. Usa el módulo de inventario con almacén y motivo."],
+        ["Existencias", "El material se carga una sola vez. Para stock, añade la plantilla Existencias al grupo con almacén y motivo."],
         ["Formato", "No cambies encabezados. Usa valores, sin fórmulas. Conserva códigos como texto y decimales con punto."],
         ["Datos industriales", "Los datos de planificación son informativos. No crean órdenes, reservas, MRP ni asientos."],
     ]:

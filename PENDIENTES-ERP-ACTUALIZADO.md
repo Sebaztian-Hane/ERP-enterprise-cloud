@@ -208,3 +208,11 @@ contable completa y exportaciones pesadas.
 - La firma con certificado y validez legal depende del proveedor aún no elegido.
 - Nómina/RR.HH., manufactura/MRP, consolidación y microservicios son fases
   futuras, no requisitos del piloto actual.
+
+## Actualización 2026-11-01: grupos de migración
+
+Se reemplazan las entradas de carga repartidas por módulos por un Centro de
+migraciones con 33 objetos, 15 grupos de selección y dependencias por código.
+Simulación transaccional, carga atómica con check final/MFA, 33 Excel de prueba
+y ventanas compartidas de referencias. SQL 0065/0066 confirmado en la conexión
+del ERP. Manual vigente: [README-MIGRACIONES](docs/README-MIGRACIONES.md).

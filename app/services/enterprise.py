@@ -129,7 +129,7 @@ def _reference(target, value, actor, db, *, active=True):
     return row
 
 
-def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, target_state=None, record_id=None) -> tuple[dict, dict]:
+def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, target_state=None, record_id=None, migration_draft=False) -> tuple[dict, dict]:
     if len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8")) > 65536:
         raise HTTPException(status_code=422, detail="El documento supera 64 KB")
     try:
@@ -145,7 +145,7 @@ def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, t
     required = resource.completion.get(target_state, ())
     if any(key not in data or data[key] is None or (isinstance(data[key], str) and not data[key].strip()) for key in required):
         raise HTTPException(status_code=422, detail="Completa los datos de cierre: " + ", ".join(required))
-    if resource.code in {"absences", "attendance"} and (target_state is None or target_state == "approved") and refs["employee_id"].status != "active":
+    if resource.code in {"absences", "attendance"} and ((target_state is None and not migration_draft) or target_state == "approved") and refs["employee_id"].status != "active":
         raise HTTPException(status_code=422, detail="El empleado debe estar activo")
     if resource.code == "employees" and data["contract_type"] != "indefinite" and target_state == "active":
         if not data.get("contract_end_date") or data["contract_end_date"] < data["hire_date"]:
@@ -154,7 +154,7 @@ def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, t
         data["license_plate"] = data["license_plate"].upper()
         duplicate = db.scalar(select(EnterpriseRecord.id).where(EnterpriseRecord.tenant_id == actor.tenant_id, EnterpriseRecord.resource_code == "vehicles", EnterpriseRecord.status != "cancelled", EnterpriseRecord.data["license_plate"].as_string() == data["license_plate"], EnterpriseRecord.id != record_id if record_id else True).limit(1))
         if duplicate: raise HTTPException(status_code=409, detail="La placa ya está registrada en esta empresa")
-    if resource.code in {"maintenance_orders", "maintenance_notifications"} and target_state in {None, "released"} and refs["equipment_id"].status != "active":
+    if resource.code in {"maintenance_orders", "maintenance_notifications"} and ((target_state is None and not migration_draft) or target_state in {"released", "in_progress", "resolved"}) and refs["equipment_id"].status != "active":
         raise HTTPException(status_code=422, detail="El equipo debe estar activo")
     if resource.code == "warehouse_tasks" and data["source_bin"].casefold() == data["destination_bin"].casefold():
         raise HTTPException(status_code=422, detail="Las ubicaciones origen y destino deben ser distintas")
@@ -184,7 +184,7 @@ def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, t
             raise HTTPException(status_code=409, detail="La ausencia se superpone con una ausencia aprobada")
     if resource.code == "supplier_quotes":
         requisition = refs["requisition_id"]
-        if requisition.status not in {"submitted", "approved"}:
+        if requisition.status not in {"submitted", "approved"} and not (migration_draft and target_state is None and requisition.status == "draft"):
             raise HTTPException(status_code=422, detail="La solicitud debe estar enviada o aprobada")
         if target_state == "selected":
             tenant = db.get(Tenant, actor.tenant_id)
@@ -213,8 +213,10 @@ def add_event(db, row, actor, action, previous, note):
     audit(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action=action, module="enterprise", entity=row.resource_code, entity_id=row.id, detail=f"{previous or '-'} -> {row.status}; versión {row.version}; SHA256={digest}")
 
 
-def create(resource: Resource, command, actor: Actor, db: Session):
-    data, _ = validate_data(resource, command.data, actor, db)
+def create(resource: Resource, command, actor: Actor, db: Session, *, migration_draft=False):
+    # Only the migration service uses this flag. HTTP forms cannot supply it.
+    # It permits linked initial documents, never activation or approval.
+    data, _ = validate_data(resource, command.data, actor, db, migration_draft=migration_draft)
     row = EnterpriseRecord(tenant_id=actor.tenant_id, module_code=resource.module, resource_code=resource.code, number=command.number, title=command.title, data=data, derived={}, status=resource.initial, version=1, created_by=actor.user_id, updated_by=actor.user_id)
     db.add(row); db.flush()
     add_event(db, row, actor, "create", None, "Alta del documento")
