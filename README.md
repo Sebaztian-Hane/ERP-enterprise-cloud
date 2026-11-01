@@ -14,7 +14,19 @@ API REST multiempresa para ERP EnterpriseCloud, construida con FastAPI, PostgreS
 
 La API queda disponible en `/docs`; el chequeo básico en `/health` y el de disponibilidad con base de datos en `/ready`. Los recursos disponibles inicialmente son clientes, proveedores, categorías, productos, almacenes, inventario, compras, ventas, pagos, documentos y dashboard.
 
-## Pruebas
+## Carga y exportación de materiales
+
+El botón Migrar y el nuevo Centro de datos comparten el contrato del backend.
+La plantilla de materiales 2.0 ofrece 25 campos, conserva las cargas anteriores
+de seis columnas y separa el maestro de las existencias. Incluye validación,
+incidencias descargables, exportación Excel/CSV y comprobante con SHA-256.
+
+Antes de desplegar esta ampliación, aplica en la base correspondiente la
+migración **0064_material_master_profiles.sql** después de las anteriores.
+No se ejecuta automáticamente ni cambia productos o movimientos históricos.
+Consulta [flujos, límites y despliegue](docs/FLUJOS-Y-CARGA-DE-DATOS.md).
+
+### Ejecutar las pruebas
 
 Ejecuta las pruebas con el entorno virtual del proyecto:
 

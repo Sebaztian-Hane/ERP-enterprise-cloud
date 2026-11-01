@@ -4,7 +4,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Category, Inventory, InventoryLot, InventoryMovement, InventorySerial, Product, UnitOfMeasure
+from app.models.entities import Category, Inventory, InventoryLot, InventoryMovement, InventorySerial, Product, ProductMaterialProfile, UnitOfMeasure
+from app.schemas.materials import MaterialProfile
+from app.services.material_master import MATERIAL_FIELDS, PROFILE_FIELDS
 from app.schemas.catalog import CategoryCreate, CategoryOut, ProductCreate, ProductOut, ProductUpdate
 from app.schemas.pagination import paginate
 from app.security.auth import Actor, require_permission
@@ -142,3 +144,29 @@ def update_product(product_id: UUID, data: ProductUpdate, actor: Actor = Depends
         raise HTTPException(status_code=409, detail="El SKU ya existe en esta empresa") from exc
     db.refresh(product)
     return product
+
+
+@router.get("/{product_id}/material-profile")
+def get_material_profile(product_id: UUID, actor: Actor = Depends(require_permission("products:read")), db: Session = Depends(get_db)):
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.tenant_id == actor.tenant_id))
+    if product is None:
+        raise HTTPException(status_code=404, detail="Material no encontrado en la empresa activa")
+    profile = db.scalar(select(ProductMaterialProfile).where(ProductMaterialProfile.product_id == product_id, ProductMaterialProfile.tenant_id == actor.tenant_id))
+    return {"product_id": product_id, "attributes": profile.attributes if profile else {}, "fields": [{"key": key, "group": group, "description": description} for key, group, description, _ in MATERIAL_FIELDS if key in PROFILE_FIELDS]}
+
+
+@router.put("/{product_id}/material-profile")
+def save_material_profile(product_id: UUID, data: MaterialProfile, actor: Actor = Depends(require_permission("products:write")), db: Session = Depends(get_db)):
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.tenant_id == actor.tenant_id))
+    if product is None:
+        raise HTTPException(status_code=404, detail="Material no encontrado en la empresa activa")
+    # Serialize edits per material, including first profile creation.
+    db.scalar(select(Product).where(Product.id == product_id, Product.tenant_id == actor.tenant_id).with_for_update())
+    profile = db.scalar(select(ProductMaterialProfile).where(ProductMaterialProfile.product_id == product_id, ProductMaterialProfile.tenant_id == actor.tenant_id))
+    if profile is None:
+        profile = ProductMaterialProfile(tenant_id=actor.tenant_id, product_id=product_id)
+        db.add(profile)
+    profile.attributes = data.model_dump(mode="json", exclude_unset=True)
+    record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="update_material_profile", module="products", entity="product", entity_id=product_id)
+    db.commit()
+    return {"product_id": product_id, "attributes": profile.attributes}

@@ -1,6 +1,6 @@
 # Pendientes actualizados — EnterpriseCloud ERP
 
-> Actualizado: 25 de octubre de 2026.
+> Actualizado: 1 de noviembre de 2026.
 >
 > Estado: piloto funcional multi-tenant. Este archivo contiene trabajo pendiente,
 > riesgos abiertos y el orden recomendado; no reabre entregables ya verificados.
@@ -135,6 +135,16 @@
   certificado, cadena, sello de tiempo y evidencia verificable.
 
 ## P4 — Maestros, importación y experiencia
+
+Avance preparado en código el 1 de noviembre (pendiente de despliegue y prueba
+en PostgreSQL): Centro de datos sobre el botón Migrar existente; contrato único
+de plantillas desde la API; materiales con 25 campos y ficha industrial adicional;
+Excel con diccionario/catálogos/ejemplo separado; errores por fila descargables;
+exportación CSV/XLSX por tenant; hash de archivo, revalidación e idempotencia.
+Requiere la migración `0064_material_master_profiles.sql`. Se conserva la carga
+original de seis columnas. Ver `docs/FLUJOS-Y-CARGA-DE-DATOS.md`.
+Siguen pendientes mapeos reutilizables, reversión de lotes confirmados, simulación
+contable completa, exportaciones pesadas y verificación visual autenticada.
 
 - [ ] Versionar impuestos, monedas, tipos de cambio, unidades SUNAT, listas de
   precios, condiciones de pago y políticas de descuento.

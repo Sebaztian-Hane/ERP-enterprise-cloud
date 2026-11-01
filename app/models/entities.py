@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
@@ -206,7 +206,7 @@ class UnitOfMeasure(Base):
 
 class Product(TimestampedTenantModel):
     __tablename__ = "products"
-    __table_args__ = (UniqueConstraint("tenant_id", "sku"), Index("ix_products_tenant_name", "tenant_id", "name"))
+    __table_args__ = (UniqueConstraint("tenant_id", "sku"), UniqueConstraint("tenant_id", "id", name="uq_products_tenant_id_id"), Index("ix_products_tenant_name", "tenant_id", "name"))
     sku: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     category_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("categories.id"))
@@ -221,6 +221,18 @@ class Product(TimestampedTenantModel):
     cost_method: Mapped[str] = mapped_column(String(20), default="weighted_average", nullable=False)
     average_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ProductMaterialProfile(TimestampedTenantModel):
+    """Additive extension: existing product queries do not require this table."""
+
+    __tablename__ = "product_material_profiles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "product_id"),
+        ForeignKeyConstraint(["tenant_id", "product_id"], ["products.tenant_id", "products.id"]),
+    )
+    product_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    attributes: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 
 class Supplier(TimestampedTenantModel):
