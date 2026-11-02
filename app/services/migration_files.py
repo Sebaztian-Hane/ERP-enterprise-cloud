@@ -135,13 +135,18 @@ def recognize_file(filename, content, allowed, expected=None):
             book = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
             sheets = [sheet for sheet in book if normalized_name(sheet.title) not in SUPPORT_SHEETS]
             if not sheets or len(sheets) > len(DEFINITIONS): raise ValueError("El libro no contiene hojas de plantilla o supera el número de objetos admitidos")
-            if expected and len(sheets) != 1: raise ValueError("El Excel contiene varias plantillas. Usa Carga masiva para asignarlas juntas")
+            multi = len(sheets) > 1
             for sheet in sheets:
                 if sheet.max_column and sheet.max_column > 100:
                     errors.append(issue(filename, sheet.title, "La hoja supera 100 columnas")); continue
-                item, messages = _sheet(iter(sheet.iter_rows(values_only=True)), filename, sheet.title, allowed, expected, len(sheets) > 1)
+                # A row upload can contain a complete workbook. Recognize each
+                # sheet independently instead of imposing the clicked row's schema.
+                item, messages = _sheet(iter(sheet.iter_rows(values_only=True)), filename, sheet.title, allowed, None if multi else expected, multi)
                 if item: found.append(item)
                 errors.extend(messages)
+            if multi and expected and expected not in {item.code for item in found}:
+                label = SHEET_NAMES.get(expected, expected)
+                errors.append(issue(filename, "", f"El libro no contiene una hoja válida de {label}, la plantilla seleccionada. Elige su fila correspondiente o usa Carga masiva.", code=expected))
     except (ValueError, BadZipFile, csv.Error, UnicodeDecodeError) as error:
         errors.append(issue(filename, "", str(error)))
     except Exception:

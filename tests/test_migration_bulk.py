@@ -1,6 +1,7 @@
 import io
 from zipfile import ZipFile, ZIP_STORED
 
+import pytest
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
@@ -42,6 +43,49 @@ def test_multisheet_excel_auto_assigns_and_simulates_complete_dependency_order(s
     assert count(suite[1], Product) == 0
     assert count(suite[1], UnitOfMeasure) == 0
     assert project["simulation"]["objects"]["products"]["logs"][0]["severity"] == "success"
+
+
+@pytest.mark.parametrize("target", ["cost_centers", "budgets"])
+def test_row_upload_assigns_complete_co_workbook_and_simulates_without_business_writes(suite, target):
+    project = create(suite, ["co"])
+    content = excel([sheet("cost_centers"), sheet("budgets"), ("Guía", ["Instrucciones"], [])])
+    response = suite[0].post(f"/api/v1/migration-projects/{project['id']}/objects/{target}/file", data={"version": project["version"]}, files={"file": ("CO - Centros de costo y presupuestos.xlsx", content)})
+    assert response.status_code == 200, response.text
+    staged = response.json()
+    assert {item["code"] for item in staged["objects"] if item["rows"]} == {"cost_centers", "budgets"}
+    assert {log["sheet"] for log in staged["simulation"]["upload_logs"]} == {"Centros de costo", "Presupuestos"}
+    assert all(log["severity"] == "success" for log in staged["simulation"]["upload_logs"])
+    result = simulate(suite, staged)
+    assert result["simulation"]["can_commit"], result["simulation"]
+    assert count(suite[1], EnterpriseRecord) == 0
+    # Re-selecting the identical book preserves the valid simulation.
+    repeated = suite[0].post(f"/api/v1/migration-projects/{project['id']}/objects/{target}/file", data={"version": result["version"]}, files={"file": ("CO - Centros de costo y presupuestos.xlsx", content)})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["version"] == result["version"]
+    assert repeated.json()["simulation"]["can_commit"]
+
+
+@pytest.mark.parametrize("case", ["missing_target", "wrong_columns", "unassigned_sheet", "duplicate_sheet", "wrong_single_sheet"])
+def test_row_workbook_rejection_preserves_previous_data(suite, case):
+    project = upload(suite, create(suite, ["base"]), "units")
+    objects = {
+        "missing_target": [sheet("customers"), sheet("suppliers")],
+        "wrong_columns": [sheet("products"), ("Clientes", ["code", "columna_inventada"], [{"code": "BAD", "columna_inventada": "error"}])],
+        "unassigned_sheet": [sheet("products"), sheet("employees")],
+        "duplicate_sheet": [sheet("products"), ("products", DEFINITIONS["products"]["columns"], example_rows()["products"])],
+        "wrong_single_sheet": [sheet("customers")],
+    }[case]
+    response = suite[0].post(f"/api/v1/migration-projects/{project['id']}/objects/products/file", data={"version": project["version"]}, files={"file": ("Libro.xlsx", excel(objects))})
+    assert response.status_code == 422, response.text
+    logs = response.json()["detail"]["logs"]
+    assert logs and all(log["severity"] == "error" for log in logs)
+    if case == "missing_target": assert "Materiales y productos" in logs[0]["message"]
+    if case == "wrong_columns": assert any(log["sheet"] == "Clientes" and log["field"] == "columna_inventada" and log["row"] == 1 for log in logs)
+    if case == "unassigned_sheet": assert any(log["object"] == "employees" and "módulos asignados" in log["message"] for log in logs)
+    if case == "duplicate_sheet": assert "más de una vez" in logs[0]["message"]
+    current = suite[0].get(f"/api/v1/migration-projects/{project['id']}").json()
+    assert current["version"] == project["version"]
+    assert {row.object_code for row in suite[1].scalars(select(MigrationObject))} == {"units"}
 
 
 def test_invalid_file_rejects_whole_batch_with_field_location_and_keeps_previous_upload(suite):
