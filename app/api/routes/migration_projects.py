@@ -15,8 +15,8 @@ from app.models.migration_projects import MigrationProject
 from app.security.auth import Actor, require_owner_or_admin, require_second_factor
 from app.services import migration_catalog as catalog, migration_projects as service
 from app.services.migration_examples import example_rows
-from app.services.migration_workbooks import csv_bytes, workbook_bytes
-from app.api.routes.imports import _rows_from_upload, MAX_FILE_SIZE
+from app.services.migration_workbooks import csv_bytes, workbook_bytes, group_workbook_bytes
+from app.services.migration_files import recognize_file, reject, issue, MAX_FILE_BYTES, MAX_BATCH_BYTES, MAX_FILES, SHEET_NAMES
 
 router = APIRouter(prefix="/migration-projects", tags=["migration projects"])
 
@@ -106,41 +106,86 @@ def example_pack(project_id: UUID, actor: Actor = Depends(require_owner_or_admin
 @router.post("/{project_id}/objects/{code}/file")
 async def upload(project_id: UUID, code: str, version: int = Form(..., ge=1), file: UploadFile = File(...), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
     project = service.get_project(db, actor, project_id, lock=True)
-    content = await file.read(MAX_FILE_SIZE + 1); await file.seek(0)
-    rows = await _rows_from_upload(file)
-    return finish(db, service.stage(db, actor, project, code, rows, file.filename or code, sha256(content).hexdigest(), version))
+    service.check_version(project, version)
+    content = await file.read(MAX_FILE_BYTES + 1)
+    found = recognize_file(file.filename or code + ".xlsx", content, project.object_codes, expected=code)
+    return stage_recognized(db, actor, project, [(item, sha256(content).hexdigest()) for item in found])
+
+
+def stage_recognized(db, actor, project, recognized):
+    initial_version = project.version
+    seen, duplicates = set(), []
+    for item, _ in recognized:
+        if item.code in seen: duplicates.append(issue(item.filename, item.sheet, "La misma plantilla aparece más de una vez en el envío. Conserva una sola hoja por objeto.", code=item.code))
+        seen.add(item.code)
+    if duplicates: reject(duplicates)
+    logs = []
+    try:
+        for item, digest in recognized:
+            service.stage(db, actor, project, item.code, item.rows, item.filename, digest, project.version)
+            logs.extend(item.messages)
+        project.simulation = {**(project.simulation if project.version == initial_version else {}), "upload_logs": logs}
+        return finish(db, project)
+    except HTTPException as error:
+        db.rollback()
+        reject([issue(item.filename, item.sheet, str(error.detail), code=item.code)])
+    except Exception:
+        db.rollback(); raise
+
+
+@router.post("/{project_id}/upload-bulk")
+async def upload_bulk(project_id: UUID, version: int = Form(..., ge=1), files: list[UploadFile] = File(...), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+    project = service.get_project(db, actor, project_id, lock=True)
+    service.check_version(project, version)
+    if len(files) > MAX_FILES: reject([issue("", "", f"Selecciona hasta {MAX_FILES} archivos por envío")])
+    recognized, logs, total = [], [], 0
+    for file in files:
+        data = await file.read(MAX_FILE_BYTES + 1)
+        total += len(data)
+        if total > MAX_BATCH_BYTES: reject([issue(file.filename or "", "", "El envío supera 40 MB. Divide los archivos en varios envíos al mismo grupo.")])
+        try:
+            recognized.extend((item, sha256(data).hexdigest()) for item in recognize_file(file.filename or "", data, project.object_codes))
+        except HTTPException as error:
+            logs.extend(error.detail["logs"])
+    if logs: reject(logs)
+    return stage_recognized(db, actor, project, recognized)
 
 
 @router.post("/{project_id}/upload-pack")
 async def upload_pack(project_id: UUID, version: int = Form(..., ge=1), file: UploadFile = File(...), actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
     project = service.get_project(db, actor, project_id, lock=True)
     service.check_version(project, version)
-    content = await file.read(service.MAX_PROJECT_BYTES + 1)
-    if len(content) > service.MAX_PROJECT_BYTES: raise HTTPException(status_code=422, detail="El ZIP supera 10 MB")
+    content = await file.read(MAX_BATCH_BYTES + 1)
+    if len(content) > MAX_BATCH_BYTES: raise HTTPException(status_code=422, detail="El ZIP supera 40 MB")
+    recognized = []
     try:
         with ZipFile(io.BytesIO(content)) as archive:
             entries = [item for item in archive.infolist() if not item.is_dir() and item.filename.lower().endswith((".xlsx", ".csv"))]
-            if not entries or len(entries) > len(project.object_codes) or sum(item.file_size for item in archive.infolist()) > 20 * 1024 * 1024:
+            if not entries or len(entries) > MAX_FILES or sum(item.file_size for item in archive.infolist()) > MAX_BATCH_BYTES:
                 raise ValueError("El paquete está vacío o supera los límites del grupo")
-            seen = set()
             for entry in entries:
-                if "/" in entry.filename or "\\" in entry.filename or entry.file_size > MAX_FILE_SIZE: raise ValueError("Usa los archivos en la raíz del ZIP; máximo 5 MB por plantilla")
-                code = entry.filename.rsplit(".", 1)[0]
-                if code in seen or code not in project.object_codes: raise ValueError("Objeto duplicado o ajeno al grupo: " + code)
-                seen.add(code)
-                with archive.open(entry) as stream: data = stream.read(MAX_FILE_SIZE + 1)
-                rows = await _rows_from_upload(UploadFile(filename=entry.filename, file=io.BytesIO(data)))
-                service.stage(db, actor, project, code, rows, entry.filename, sha256(data).hexdigest(), project.version)
+                if "/" in entry.filename or "\\" in entry.filename or entry.file_size > MAX_FILE_BYTES: raise ValueError("Usa los archivos en la raíz del ZIP; máximo 20 MB por Excel")
+                with archive.open(entry) as stream: data = stream.read(MAX_FILE_BYTES + 1)
+                recognized.extend((item, sha256(data).hexdigest()) for item in recognize_file(entry.filename, data, project.object_codes))
     except (BadZipFile, ValueError) as error:
         db.rollback(); raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception:
         db.rollback(); raise
-    return finish(db, project)
+    return stage_recognized(db, actor, project, recognized)
 
 
 @router.post("/{project_id}/objects/{code}/remove")
 def remove(project_id: UUID, code: str, body: Version, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
     return finish(db, service.remove_file(db, service.get_project(db, actor, project_id, lock=True), code, body.version))
+
+
+@router.get("/{project_id}/workbook")
+def group_workbook(project_id: UUID, example: bool = False, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+    project = service.get_project(db, actor, project_id)
+    prefix = project.id.hex[:8].upper()
+    templates = [workbook_template(code, db, prefix) for code in project.object_codes]
+    content = group_workbook_bytes(templates, example_rows(prefix) if example else None)
+    return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="Plantillas del grupo.xlsx"', "Cache-Control": "no-store"})
 
 
 @router.post("/{project_id}/simulate")

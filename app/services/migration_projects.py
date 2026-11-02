@@ -22,9 +22,10 @@ from app.services.enterprise_catalog import RESOURCE_BY_CODE
 from app.services.idempotency import canonical_hash
 from app.services.migration_catalog import DEFINITIONS, accessible, column_name, order_objects, select_objects
 from app.services.audit import record as audit
+from app.services.migration_files import MAX_PROJECT_ROWS, MAX_PROJECT_BYTES
+from app.services.migration_files import issue
 
-MAX_PROJECT_ROWS = 2000
-MAX_PROJECT_BYTES = 10 * 1024 * 1024
+SOURCE_KEYS = {"__source_row__", "__source_sheet__", "__source_file__"}
 
 
 def available(db):
@@ -90,21 +91,21 @@ def stage(db, actor, project, code, rows, filename, digest, version):
     prior = existing.get(code)
     if prior and prior.file_sha256 == digest and project.status != "migrated": return project
     check_version(project, version)
-    unknown = set().union(*(set(row) for row in rows)) - set(DEFINITIONS[code]["columns"]) - {"__source_row__"}
+    unknown = set().union(*(set(row) for row in rows)) - set(DEFINITIONS[code]["columns"]) - SOURCE_KEYS
     if unknown: raise HTTPException(status_code=422, detail="Columnas no reconocidas: " + ", ".join(sorted(unknown)))
     # Excel serial dates arrive as datetime at midnight. Persist calendar dates
     # before JSON encoding so both the legacy and enterprise validators agree.
     normalized = jsonable_encoder([{key: value.date().isoformat() if isinstance(value, datetime) else value.isoformat() if isinstance(value, date) else value for key, value in row.items()} for row in rows])
     all_rows = [row for key, item in existing.items() if key != code for row in item.rows] + normalized
     if len(all_rows) > MAX_PROJECT_ROWS or len(json.dumps(all_rows, ensure_ascii=False).encode("utf-8")) > MAX_PROJECT_BYTES:
-        raise HTTPException(status_code=422, detail="El grupo admite hasta 2000 filas y 10 MB de datos preparados")
+        raise HTTPException(status_code=422, detail=f"El grupo admite hasta {MAX_PROJECT_ROWS} filas y 20 MB de datos preparados")
     safe_name = PurePath(filename.replace("\\", "/")).name[:200]
     if prior:
         prior.rows = normalized; prior.filename = safe_name; prior.file_sha256 = digest; prior.uploaded_by = actor.user_id
     else:
         db.add(MigrationObject(tenant_id=actor.tenant_id, project_id=project.id, object_code=code, rows=normalized, filename=safe_name, file_sha256=digest, uploaded_by=actor.user_id))
     db.flush()
-    advance(db, project, version, status="uploaded", simulation={})
+    advance(db, project, version, status="uploaded", simulation={"upload_logs": project.simulation.get("upload_logs", [])})
     return project
 
 
@@ -131,38 +132,64 @@ def _resolve_code(db, actor, target, value):
 
 def _enterprise_rows(code, rows, actor, db):
     enterprise.ensure_ready(db)
-    resource = RESOURCE_BY_CODE[code]
     grouped = defaultdict(list)
     for row in rows: grouped[str(row.get("number", "")).strip()].append(row)
-    count = 0
+    count, errors = 0, []
     for number, lines in grouped.items():
-        first = lines[0]
-        if len(lines) > 1 and code != "bills_of_material": raise ValueError(f"Número repetido: {number}")
-        data = {}
-        for field in resource.fields:
-            if field.kind == "lines":
-                header = {k: v for k, v in first.items() if k not in {"component_sku", "component_quantity", "__source_row__"}}
-                if any({k: v for k, v in row.items() if k not in {"component_sku", "component_quantity", "__source_row__"}} != header for row in lines):
-                    raise ValueError(f"La estructura {number} tiene cabeceras distintas entre componentes")
-                data[field.key] = [{"product_id": _resolve_code(db, actor, "core:products", row.get("component_sku", "")), "quantity": row.get("component_quantity")} for row in lines]
-            else:
-                value = first.get(column_name(field))
-                if value not in (None, ""):
-                    data[field.key] = _resolve_code(db, actor, field.reference, value) if field.reference else value
-        command = RecordCreate(number=number, title=first.get("title", ""), data=data)
-        enterprise.create(resource, command, actor, db, migration_draft=True)
-        count += 1
+        try:
+            with db.begin_nested():
+                _enterprise_document(code, number, lines, actor, db)
+            count += 1
+        except (HTTPException, ValueError, IntegrityError) as error:
+            errors.extend(_located_errors(error, code, lines[0]))
+    if errors: raise HTTPException(status_code=422, detail=errors)
     return count, 0
+
+
+def _enterprise_document(code, number, lines, actor, db):
+    resource = RESOURCE_BY_CODE[code]
+    first = lines[0]
+    if len(lines) > 1 and code != "bills_of_material": raise ValueError(f"Número repetido: {number}")
+    data = {}
+    for field in resource.fields:
+        if field.kind == "lines":
+            header = {k: v for k, v in first.items() if k not in {"component_sku", "component_quantity"} | SOURCE_KEYS}
+            if any({k: v for k, v in row.items() if k not in {"component_sku", "component_quantity"} | SOURCE_KEYS} != header for row in lines):
+                raise ValueError(f"La estructura {number} tiene cabeceras distintas entre componentes")
+            components = []
+            for row in lines:
+                try:
+                    components.append({"product_id": _resolve_code(db, actor, "core:products", row.get("component_sku", "")), "quantity": row.get("component_quantity")})
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=_located_errors(error, code, row, "component_sku")) from error
+            data[field.key] = components
+        else:
+            value = first.get(column_name(field))
+            if value not in (None, ""):
+                try:
+                    data[field.key] = _resolve_code(db, actor, field.reference, value) if field.reference else value
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=_located_errors(error, code, first, column_name(field))) from error
+    command = RecordCreate(number=number, title=first.get("title", ""), data=data)
+    enterprise.create(resource, command, actor, db, migration_draft=True)
 
 
 def _extra_rows(code, rows, actor, db):
     created, reused, seen = 0, 0, set()
+    errors = []
     for row in rows:
         key, name = str(row.get("code") or "").strip(), str(row.get("name") or "").strip()
-        if not key or len(key) > (16 if code == "units" else 40) or not name or len(name) > 80:
-            raise ValueError("Completa code (hasta 16 caracteres para unidades) y name (hasta 80)")
-        if key.casefold() in seen: raise ValueError(f"Código duplicado: {key}")
+        limit = 16 if code == "units" else 40
+        if not key or len(key) > limit:
+            errors.extend(_located_errors(ValueError(f"code es obligatorio y admite hasta {limit} caracteres"), code, row, "code"))
+        if not name or len(name) > 80:
+            errors.extend(_located_errors(ValueError("name es obligatorio y admite hasta 80 caracteres"), code, row, "name"))
+        if key.casefold() in seen:
+            errors.extend(_located_errors(ValueError(f"Código duplicado: {key}"), code, row, "code"))
         seen.add(key.casefold())
+    if errors: raise HTTPException(status_code=422, detail=errors)
+    for row in rows:
+        key, name = str(row.get("code") or "").strip(), str(row.get("name") or "").strip()
         if code == "units":
             existing = db.scalar(select(UnitOfMeasure).where(UnitOfMeasure.tenant_id == actor.tenant_id, func.lower(UnitOfMeasure.code) == key.lower()))
             if existing:
@@ -180,6 +207,7 @@ def _extra_rows(code, rows, actor, db):
 
 
 def _core_rows(code, rows, actor, db):
+    rows = [{key: value for key, value in row.items() if key not in SOURCE_KEYS - {"__source_row__"}} for row in rows]
     valid, errors = imports._validate_rows(code, rows)
     if errors: raise HTTPException(status_code=422, detail=errors)
     conflicts = imports._check_database_conflicts(code, valid, actor, db)
@@ -216,9 +244,22 @@ def _message(error):
     if isinstance(error, HTTPException):
         return error.detail if isinstance(error.detail, list) else [{"row": None, "message": str(error.detail)}]
     if isinstance(error, ValidationError):
-        return [{"row": None, "message": ".".join(str(x) for x in item["loc"]) + ": " + item["msg"]} for item in error.errors()]
+        return [{"row": None, "field": ".".join(str(x) for x in item["loc"]), "message": item["msg"]} for item in error.errors()]
     if isinstance(error, IntegrityError): return [{"row": None, "message": "Código duplicado o referencia incompatible. No se guardaron datos de este objeto"}]
     return [{"row": None, "message": str(error)}]
+
+
+def _located_errors(error, code, source, field=None):
+    result = []
+    for entry in _message(error):
+        entry = {"message": entry} if isinstance(entry, str) else entry
+        key = entry.get("field") or field or (".".join(str(item) for item in entry["loc"]) if entry.get("loc") else None)
+        if not key:
+            key = next((key for key in DEFINITIONS[code]["columns"] if key in entry.get("message", "").split()), None)
+        if code in RESOURCE_BY_CODE and key:
+            key = next((column_name(item) for item in RESOURCE_BY_CODE[code].fields if item.key == key), key)
+        result.append({**entry, **issue(source.get("__source_file__", ""), source.get("__source_sheet__", "Plantilla"), entry.get("message", entry.get("msg", "Dato inválido")), code=code, row=entry.get("row") or source.get("__source_row__"), field=key, value=source.get(key) if key else None, phase="simulation")})
+    return result
 
 
 def digest_for(project, staged):
@@ -231,7 +272,7 @@ def run_objects(db, actor, project, staged):
     current = accessible(actor, db)
     for code in order_objects(project.object_codes):
         if code not in by_code: continue
-        report = {"rows": len(by_code[code].rows), "created": 0, "reused": 0, "status": "error", "errors": []}
+        report = {"rows": len(by_code[code].rows), "created": 0, "reused": 0, "status": "error", "errors": [], "error_count": 0, "logs": []}
         reports[code] = report
         try:
             if code not in current or any(dep not in current for dep in DEFINITIONS[code]["required_dependencies"]):
@@ -242,8 +283,19 @@ def run_objects(db, actor, project, staged):
                 count, reused = _enterprise_rows(code, by_code[code].rows, actor, db) if code in RESOURCE_BY_CODE else _extra_rows(code, by_code[code].rows, actor, db) if code in {"units", "cost_centers"} else _core_rows(code, by_code[code].rows, actor, db)
                 db.flush()
             report.update(created=count, reused=reused, status="ready")
+            report["logs"] = [issue(by_code[code].filename, by_code[code].rows[0].get("__source_sheet__", "Plantilla"), f"{len(by_code[code].rows)} filas comprobadas: {count} altas y {reused} referencias existentes. Sin errores.", code=code, severity="success", phase="simulation")]
         except (HTTPException, ValueError, IntegrityError) as error:
-            report["errors"] = _message(error)[:50]
+            messages = []
+            for entry in _message(error):
+                row_number = entry.get("row") if isinstance(entry, dict) else None
+                source = next((row for row in by_code[code].rows if row.get("__source_row__") == row_number), {})
+                source = {"__source_file__": by_code[code].filename, "__source_sheet__": by_code[code].rows[0].get("__source_sheet__", "Plantilla"), **source}
+                messages.extend(_located_errors(HTTPException(status_code=422, detail=[entry]), code, source))
+            report["error_count"] = len(messages)
+            report["errors"] = messages[:500]
+            report["logs"] = messages[:500]
+            if len(messages) > 500:
+                report["logs"].append(issue(by_code[code].filename, by_code[code].rows[0].get("__source_sheet__", "Plantilla"), f"Se encontraron {len(messages)} errores. Este registro muestra los primeros 500; corrige la plantilla y vuelve a simular para revisar los restantes.", code=code, severity="warning", phase="simulation"))
     return reports
 
 
@@ -260,7 +312,7 @@ def simulate(db, actor, project, version):
         reports = run_objects(db, actor, project, staged)
     finally:
         savepoint.rollback()
-    result = {"digest": digest, "input_version": version, "simulated_at": datetime.now(timezone.utc).isoformat(), "simulated_by": str(actor.user_id), "can_commit": bool(reports) and all(item["status"] == "ready" for item in reports.values()), "objects": reports, "total_created": sum(item["created"] for item in reports.values()), "total_rows": sum(len(item.rows) for item in staged)}
+    result = {"upload_logs": project.simulation.get("upload_logs", []), "digest": digest, "input_version": version, "simulated_at": datetime.now(timezone.utc).isoformat(), "simulated_by": str(actor.user_id), "can_commit": bool(reports) and all(item["status"] == "ready" for item in reports.values()), "objects": reports, "total_created": sum(item["created"] for item in reports.values()), "total_rows": sum(len(item.rows) for item in staged)}
     advance(db, project, version, status="ready" if result["can_commit"] else "errors", simulation=result)
     return project
 

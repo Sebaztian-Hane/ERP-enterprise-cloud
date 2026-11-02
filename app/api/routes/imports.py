@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 from hashlib import sha256
 import io
+from pydantic import ValidationError
 import re
 import unicodedata
 from zipfile import BadZipFile, ZipFile
@@ -335,6 +336,8 @@ def _validate_rows(module: str, rows: list[dict[str, Any]]) -> tuple[list[dict[s
                     raise ValueError(f"{key} está repetido dentro de la plantilla")
                 seen.add(value)
             valid.append(validated)
+        except ValidationError as exc:
+            errors.extend({"row": source_row, "field": ".".join(str(part) for part in item["loc"]), "message": item["msg"]} for item in exc.errors())
         except ValueError as exc:
             errors.append({"row": source_row, "message": str(exc)})
     return valid, errors

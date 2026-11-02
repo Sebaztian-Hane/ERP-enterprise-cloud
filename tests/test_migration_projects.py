@@ -154,7 +154,9 @@ def test_file_change_invalidates_simulation_and_stale_upload_rejected(suite):
     project = simulate(suite, upload(suite, create(suite, ["base"]), "units"))
     old = project
     project = upload(suite, project, "units", [{"code": "NEW", "name": "Unidad nueva"}])
-    assert project["simulation"] == {}
+    assert not project["simulation"].get("can_commit")
+    assert not project["simulation"].get("digest")
+    assert project["simulation"]["upload_logs"][0]["object"] == "units"
     commit(suite, old, 409)
     upload(suite, old, "units", [{"code": "STALE", "name": "Desfasada"}], 409)
     assert count(db, UnitOfMeasure) == 0

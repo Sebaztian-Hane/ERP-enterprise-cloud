@@ -40,7 +40,7 @@ def workbook_bytes(template: dict, *, rows: list[list[Any]] | None = None, catal
         ["Preparación", "Completa Plantilla. Consulta Ejemplo y Diccionario. El ejemplo separado no se importa."],
         ["Lugar de carga", "Centro de migraciones: crea un grupo y usa Acciones > Cargar archivo junto al objeto correspondiente."],
         ["Simulación", "Simular grupo revisa todos los archivos y referencias en secuencia. No deja registros empresariales."],
-        ["Confirmación", "Revisa el resumen y marca el check final. El grupo se guarda completo o se revierte completo. Máximo 2000 filas por grupo / 5 MB por archivo."],
+        ["Confirmación", "Revisa el resumen y marca el check final. El grupo se guarda completo o se revierte completo. Centro de migraciones: hasta 12000 filas por grupo / 20 MB por archivo."],
         ["Verificación", "Revisa los módulos y conserva el comprobante del grupo con su hash SHA-256."],
         ["Modo de carga", "Solo altas; un código existente genera conflicto. La exportación sirve para revisión, no para sobrescribir datos."],
         ["Existencias", "El material se carga una sola vez. Para stock, añade la plantilla Existencias al grupo con almacén y motivo."],
@@ -77,4 +77,29 @@ def workbook_bytes(template: dict, *, rows: list[list[Any]] | None = None, catal
     output = io.BytesIO()
     book.save(output)
     book.close()
+    return output.getvalue()
+
+
+def group_workbook_bytes(templates, examples=None):
+    from app.services.migration_files import SHEET_NAMES
+    book = Workbook()
+    book.remove(book.active)
+    for template in templates:
+        code = template["code"]
+        sheet = book.create_sheet(SHEET_NAMES[code])
+        _append(sheet, template["columns"])
+        for row in (examples or {}).get(code, []): _append(sheet, [row.get(key, "") for key in template["columns"]])
+        sheet.freeze_panes = "C2"
+        sheet.auto_filter.ref = sheet.dimensions
+        sheet.sheet_view.showGridLines = False
+        for cell in sheet[1]:
+            cell.fill = PatternFill("solid", fgColor="163E55")
+            cell.font = Font(name="Arial", color="FFFFFF", bold=True)
+            sheet.column_dimensions[cell.column_letter].width = max(20, min(48, len(str(cell.value)) + 3))
+    instructions = book.create_sheet("Instrucciones")
+    for row in [["Uso", "Cada hoja es una plantilla. Mantén su nombre y encabezados; carga el libro desde Carga masiva."], ["Carga", "El reconocimiento asigna las hojas al grupo. Después simula, revisa el Registro de validación y pulsa Cargar datos."], ["Límites", "20 MB por Excel; 40 MB por envío; 5000 filas por hoja y 12000 filas por grupo."], ["Ejemplos", "Datos ficticios relacionados; no son operaciones reales de una empresa."]]: _append(instructions, row)
+    instructions.column_dimensions["A"].width = 18
+    instructions.column_dimensions["B"].width = 115
+    output = io.BytesIO()
+    book.save(output); book.close()
     return output.getvalue()
