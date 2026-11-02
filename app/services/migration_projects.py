@@ -18,6 +18,7 @@ from app.models.enterprise import EnterpriseRecord
 from app.models.migration_projects import MigrationObject, MigrationProject
 from app.schemas.enterprise import RecordCreate
 from app.services import enterprise
+from app.services import migration_progress as progress
 from app.services.enterprise_catalog import RESOURCE_BY_CODE
 from app.services.idempotency import canonical_hash
 from app.services.migration_catalog import DEFINITIONS, accessible, column_name, order_objects, select_objects
@@ -61,7 +62,12 @@ def items(db, project):
 def payload(db, project):
     staged = {item.object_code: item for item in items(db, project)}
     reports = project.simulation.get("objects", {})
-    return {"id": project.id, "name": project.name, "groups": project.group_codes, "status": project.status, "version": project.version, "created_by": project.created_by, "created_at": project.created_at, "updated_at": project.updated_at, "simulation": project.simulation, "receipt": project.receipt, "objects": [
+    simulation = project.simulation
+    job = simulation.get("job", {})
+    if job.get("state") == "queued":
+        snapshot = progress.live_snapshot(project.tenant_id, project.id, job.get("id"))
+        simulation = {**simulation, "job": {**job, "progress": snapshot}}
+    return {"id": project.id, "name": project.name, "groups": project.group_codes, "status": project.status, "version": project.version, "created_by": project.created_by, "created_at": project.created_at, "updated_at": project.updated_at, "simulation": simulation, "receipt": project.receipt, "objects": [
         {"code": code, "filename": staged[code].filename if code in staged else None, "rows": len(staged[code].rows) if code in staged else 0, "file_sha256": staged[code].file_sha256 if code in staged else None, "status": "migrated" if project.status == "migrated" and code in staged else reports.get(code, {}).get("status", "uploaded" if code in staged else "empty"), "report": reports.get(code)} for code in project.object_codes
     ]}
 
@@ -160,13 +166,18 @@ def _enterprise_rows(code, rows, actor, db):
             prepared.append((command, data, lines))
         except (HTTPException, ValueError) as error:
             errors.extend(_located_errors(error, code, lines[0]))
+        finally:
+            progress.advance(validated=len(lines))
     if errors: raise HTTPException(status_code=422, detail=errors)
     # Batch the records, history and audit writes after the same domain checks.
     # References remain locked for this transaction and the cache dies here.
     try:
+        progress.advance(phase="preparing")
         with db.begin_nested():
-            for command, data, _ in prepared:
+            for command, data, lines in prepared:
                 enterprise.persist_initial(resource, command, data, actor, db, flush=False)
+                progress.advance(prepared=len(lines))
+            progress.advance(phase="checking")
             db.flush()
     except IntegrityError:
         # Uncommon database conflicts get individual row diagnostics. The
@@ -220,22 +231,25 @@ def _extra_rows(code, rows, actor, db):
         if key.casefold() in seen:
             errors.extend(_located_errors(ValueError(f"Código duplicado: {key}"), code, row, "code"))
         seen.add(key.casefold())
+        progress.advance(validated=1)
     if errors: raise HTTPException(status_code=422, detail=errors)
+    progress.advance(phase="preparing")
     for row in rows:
         key, name = str(row.get("code") or "").strip(), str(row.get("name") or "").strip()
         if code == "units":
             existing = db.scalar(select(UnitOfMeasure).where(UnitOfMeasure.tenant_id == actor.tenant_id, func.lower(UnitOfMeasure.code) == key.lower()))
             if existing:
                 if existing.name != name or not existing.is_active: raise ValueError(f"La unidad {key} ya existe con otros datos o está inactiva")
-                reused += 1; continue
+                reused += 1; progress.advance(prepared=1); continue
             db.add(UnitOfMeasure(tenant_id=actor.tenant_id, code=key, name=name))
         else:
             existing = db.execute(enterprise._core_query("select name,is_active from cost_centers where tenant_id=:tenant and lower(code)=:code", "tenant"), {"tenant": actor.tenant_id, "code": key.lower()}).first()
             if existing:
                 if existing.name != name or not existing.is_active: raise ValueError(f"El centro {key} ya existe con otros datos o está inactivo")
-                reused += 1; continue
+                reused += 1; progress.advance(prepared=1); continue
             db.execute(enterprise._core_query("insert into cost_centers(id,tenant_id,code,name,is_active) values(:id,:tenant,:code,:name,true)", "id", "tenant"), {"id": uuid4(), "tenant": actor.tenant_id, "code": key, "name": name})
         created += 1; db.flush()
+        progress.advance(prepared=1)
     return created, reused
 
 
@@ -243,6 +257,7 @@ def _core_rows(code, rows, actor, db):
     rows = [{key: value for key, value in row.items() if key not in SOURCE_KEYS - {"__source_row__"}} for row in rows]
     valid, errors = imports._validate_rows(code, rows)
     if errors: raise HTTPException(status_code=422, detail=errors)
+    progress.advance(phase="checking")
     conflicts = imports._check_database_conflicts(code, valid, actor, db)
     if conflicts: raise ValueError("; ".join(conflicts))
     if code == "products":
@@ -269,7 +284,9 @@ def _core_rows(code, rows, actor, db):
                 first = lines[0]
                 counterparts = db.scalars(select(model).where(model.tenant_id == actor.tenant_id, model.tax_id == first["counterpart_tax_id"], model.is_active.is_(True))).all()
                 if len(counterparts) != 1: raise ValueError("Carga primero la plantilla de clientes/proveedores con una identidad fiscal única y activa")
+        progress.advance(phase="preparing")
         return imports._persist_transactions(code, valid, actor, db), 0
+    progress.advance(phase="preparing")
     return imports._persist_master(code, valid, actor, db), 0
 
 
@@ -305,6 +322,7 @@ def run_objects(db, actor, project, staged):
     current = accessible(actor, db)
     for code in order_objects(project.object_codes):
         if code not in by_code: continue
+        progress.start(code)
         report = {"rows": len(by_code[code].rows), "created": 0, "reused": 0, "status": "error", "errors": [], "error_count": 0, "logs": []}
         reports[code] = report
         try:
@@ -316,8 +334,10 @@ def run_objects(db, actor, project, staged):
                 count, reused = _enterprise_rows(code, by_code[code].rows, actor, db) if code in RESOURCE_BY_CODE else _extra_rows(code, by_code[code].rows, actor, db) if code in {"units", "cost_centers"} else _core_rows(code, by_code[code].rows, actor, db)
                 db.flush()
             report.update(created=count, reused=reused, status="ready")
+            progress.finish()
             report["logs"] = [issue(by_code[code].filename, by_code[code].rows[0].get("__source_sheet__", "Plantilla"), f"{len(by_code[code].rows)} filas comprobadas: {count} altas y {reused} referencias existentes. Sin errores.", code=code, severity="success", phase="simulation")]
         except (HTTPException, ValueError, IntegrityError) as error:
+            progress.finish(failed=True)
             messages = []
             for entry in _message(error):
                 row_number = entry.get("row") if isinstance(entry, dict) else None

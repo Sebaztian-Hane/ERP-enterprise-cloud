@@ -20,6 +20,7 @@ from app.models.migration_projects import MigrationProject
 from app.security.auth import Actor, require_second_factor
 from app.services import migration_projects as service
 from app.services.migration_catalog import accessible
+from app.services.migration_progress import Progress, tracking
 
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="erp-migration")
 _guard = Lock()
@@ -63,6 +64,7 @@ def dispatch(project_id):
 
 def run(project_id):
     started, job_id = monotonic(), None
+    progress = None
     with SessionLocal() as db:
         try:
             # SKIP LOCKED prevents duplicate workers across server instances.
@@ -76,12 +78,15 @@ def run(project_id):
             actor = Actor(user_id=member.user_id, tenant_id=project.tenant_id, role_code=member.role_code, assurance_level="aal2" if job["kind"] == "commit" else "aal1")
             if set(project.object_codes) - set(accessible(actor, db)):
                 raise HTTPException(status_code=403, detail="Cambió la asignación de módulos. Revisa los accesos del grupo")
-            if job["kind"] == "simulate":
-                service.simulate(db, actor, project, project.version)
-            else:
-                service.commit(db, actor, project, project.version, job["digest"], True)
-            project.simulation = {**project.simulation, "job": {**job, "state": "completed", "finished_at": datetime.now(timezone.utc).isoformat(), "seconds": round(monotonic() - started, 2)}}
-            db.commit()
+            progress = Progress(project.tenant_id, project.id, job_id, service.items(db, project))
+            with tracking(progress):
+                if job["kind"] == "simulate":
+                    service.simulate(db, actor, project, project.version)
+                else:
+                    service.commit(db, actor, project, project.version, job["digest"], True)
+                progress.finalizing()
+                project.simulation = {**project.simulation, "job": {**job, "state": "completed", "progress": progress.snapshot(completed=True), "finished_at": datetime.now(timezone.utc).isoformat(), "seconds": round(monotonic() - started, 2)}}
+                db.commit()
         except Exception as error:
             db.rollback()
             if job_id is None: return
@@ -90,6 +95,7 @@ def run(project_id):
             detail = error.detail if isinstance(error, HTTPException) else "El servidor interrumpió la operación. No se guardaron datos parciales. Revisa el grupo antes de reintentar."
             message = detail if isinstance(detail, str) else detail.get("message", "Revisa los errores del grupo") if isinstance(detail, dict) else "Revisa los errores del grupo"
             simulation = {**project.simulation, "can_commit": False, "job": {**project.simulation["job"], "state": "failed", "message": message, "finished_at": datetime.now(timezone.utc).isoformat()}}
+            if progress: simulation["job"]["progress"] = progress.snapshot(failed=True, rolled_back=job["kind"] == "commit")
             if isinstance(detail, dict) and "objects" in detail: simulation["objects"] = detail["objects"]
             service.advance(db, project, project.version, status="errors", simulation=simulation)
             db.commit()

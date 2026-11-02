@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.services import migration_progress
 from app.models.entities import (
     AccountPayable,
     AccountReceivable,
@@ -340,6 +341,8 @@ def _validate_rows(module: str, rows: list[dict[str, Any]]) -> tuple[list[dict[s
             errors.extend({"row": source_row, "field": ".".join(str(part) for part in item["loc"]), "message": item["msg"]} for item in exc.errors())
         except ValueError as exc:
             errors.append({"row": source_row, "message": str(exc)})
+        finally:
+            migration_progress.advance(validated=1)
     return valid, errors
 
 
@@ -432,6 +435,7 @@ def _persist_master(module: str, rows: list[dict[str, Any]], actor: Actor, db: S
         if module == "products" and row.get("material_profile"):
             db.add(ProductMaterialProfile(tenant_id=actor.tenant_id, product_id=entity.id, attributes=row["material_profile"]))
         record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module=module, entity=module.rstrip("s"), entity_id=entity.id)
+        migration_progress.advance(prepared=1)
     return len(rows)
 
 
@@ -456,6 +460,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
             product, warehouse = products[row["product_sku"]], warehouses[row["warehouse_code"]]
             change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=row["quantity"], movement_type="adjustment", reference=row["reference"], note=row["note"] or row["reason"])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import_adjustment", module="inventory", entity="inventory_movement", detail=row["reason"])
+            migration_progress.advance(prepared=1)
         return len(rows)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -520,6 +525,7 @@ def _persist_transactions(module: str, rows: list[dict[str, Any]], actor: Actor,
                 change_stock(db, tenant_id=actor.tenant_id, product_id=product.id, warehouse_id=warehouse.id, quantity=line["quantity"], movement_type="receipt", reference=number)
             post_entry(db, tenant_id=actor.tenant_id, actor_id=actor.user_id, number=f"AS-{number}", description=f"Compra importada {number}", source_type="purchase", source_id=purchase.id, lines=[("2010", taxable_amount, Decimal("0"), cost_center.id), ("4011", tax_amount, Decimal("0"), cost_center.id), ("4210", Decimal("0"), total, cost_center.id)])
             record(db, tenant_id=actor.tenant_id, actor_user_id=actor.user_id, action="import", module="purchases", entity="purchase", entity_id=purchase.id)
+        migration_progress.advance(prepared=len(lines))
     return len(grouped)
 
 
