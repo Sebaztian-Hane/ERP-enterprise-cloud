@@ -97,7 +97,7 @@ def group_workbook_bytes(templates, examples=None):
             cell.font = Font(name="Arial", color="FFFFFF", bold=True)
             sheet.column_dimensions[cell.column_letter].width = max(20, min(48, len(str(cell.value)) + 3))
     instructions = book.create_sheet("Instrucciones")
-    for row in [["Uso", "Cada hoja es una plantilla. Mantén su nombre y encabezados; carga el libro desde Carga masiva."], ["Carga", "El reconocimiento asigna las hojas al grupo. Después simula, revisa el Registro de validación y pulsa Cargar datos."], ["Límites", "20 MB por Excel; 40 MB por envío; 5000 filas por hoja y 12000 filas por grupo."], ["Ejemplos", "Datos ficticios relacionados; no son operaciones reales de una empresa."]]: _append(instructions, row)
+    for row in [["Uso", "Cada hoja es una plantilla. Mantén su nombre y encabezados; carga el libro desde Carga masiva."], ["Carga", "El reconocimiento asigna las hojas al grupo. Después simula, revisa el Registro de validación y pulsa Cargar datos."], ["Límites", "20 MB por Excel; 40 MB por envío; 2000 filas por hoja y 12000 filas por grupo."], ["Ejemplos", "Datos ficticios relacionados; no son operaciones reales de una empresa."]]: _append(instructions, row)
     instructions.column_dimensions["A"].width = 18
     instructions.column_dimensions["B"].width = 115
     output = io.BytesIO()

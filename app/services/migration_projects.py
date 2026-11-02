@@ -40,8 +40,15 @@ def ensure_ready(db):
 def get_project(db, actor, identifier, *, lock=False):
     ensure_ready(db)
     query = select(MigrationProject).where(MigrationProject.id == identifier, MigrationProject.tenant_id == actor.tenant_id)
-    project = db.scalar(query.with_for_update() if lock else query)
+    # Inspect the committed job marker before waiting on its long transaction.
+    if lock:
+        preview = db.scalar(query)
+        if preview and preview.simulation.get("job", {}).get("state") == "queued":
+            raise HTTPException(status_code=409, detail="El grupo tiene una operación en proceso. Consulta su estado antes de modificarlo")
+    project = db.scalar(query.with_for_update().execution_options(populate_existing=True) if lock else query)
     if not project: raise HTTPException(status_code=404, detail="Grupo de migración no encontrado")
+    if lock and project.simulation.get("job", {}).get("state") == "queued":
+        raise HTTPException(status_code=409, detail="El grupo tiene una operación en proceso. Consulta su estado antes de modificarlo")
     if set(project.object_codes) - set(accessible(actor, db)):
         raise HTTPException(status_code=403, detail="El grupo contiene módulos que ya no tienes habilitados. Solicita revisar tu asignación")
     return project
@@ -118,8 +125,10 @@ def remove_file(db, project, code, version):
     return project
 
 
-def _resolve_code(db, actor, target, value):
+def _resolve_code(db, actor, target, value, cache=None):
     value = str(value).strip()
+    key = (str(actor.tenant_id), target, value.lower())
+    if cache is not None and key in cache: return cache[key]
     if target.startswith("core:"):
         table, code, _, module, _ = enterprise.CORE[target.removeprefix("core:")]
         if not enterprise.module_is_enabled(db, actor, module): raise ValueError("El módulo de la referencia no está habilitado")
@@ -127,26 +136,51 @@ def _resolve_code(db, actor, target, value):
     else:
         found = db.scalars(select(EnterpriseRecord.id).where(EnterpriseRecord.tenant_id == actor.tenant_id, EnterpriseRecord.resource_code == target, func.lower(EnterpriseRecord.number) == value.lower())).all()
     if len(found) != 1: raise ValueError(f"Referencia {target}: {value} no encontrada o ambigua. Carga su plantilla predecesora o revisa el código")
-    return str(UUID(str(found[0])))
+    resolved = str(UUID(str(found[0])))
+    if cache is not None: cache[key] = resolved
+    return resolved
 
 
 def _enterprise_rows(code, rows, actor, db):
     enterprise.ensure_ready(db)
+    resource = RESOURCE_BY_CODE[code]
     grouped = defaultdict(list)
     for row in rows: grouped[str(row.get("number", "")).strip()].append(row)
-    count, errors = 0, []
+    prepared, errors, unique = [], [], set()
+    codes, references = {}, {}
     for number, lines in grouped.items():
         try:
-            with db.begin_nested():
-                _enterprise_document(code, number, lines, actor, db)
-            count += 1
-        except (HTTPException, ValueError, IntegrityError) as error:
+            command = _enterprise_command(code, number, lines, actor, db, codes)
+            data, _ = enterprise.validate_data(resource, command.data, actor, db, migration_draft=True, reference_cache=references)
+            key = data["license_plate"] if code == "vehicles" else (data["employee_id"], data["work_date"]) if code == "attendance" else None
+            if key is not None and key in unique:
+                field = "license_plate" if code == "vehicles" else "work_date"
+                raise HTTPException(status_code=422, detail=_located_errors(ValueError("La placa o combinación empleado-fecha está repetida dentro de esta plantilla"), code, lines[0], field))
+            if key is not None: unique.add(key)
+            prepared.append((command, data, lines))
+        except (HTTPException, ValueError) as error:
             errors.extend(_located_errors(error, code, lines[0]))
     if errors: raise HTTPException(status_code=422, detail=errors)
-    return count, 0
+    # Batch the records, history and audit writes after the same domain checks.
+    # References remain locked for this transaction and the cache dies here.
+    try:
+        with db.begin_nested():
+            for command, data, _ in prepared:
+                enterprise.persist_initial(resource, command, data, actor, db, flush=False)
+            db.flush()
+    except IntegrityError:
+        # Uncommon database conflicts get individual row diagnostics. The
+        # enclosing object savepoint still rolls all its rows back on any error.
+        for command, _, lines in prepared:
+            try:
+                with db.begin_nested(): enterprise.create(resource, command, actor, db, migration_draft=True)
+            except (HTTPException, ValueError, IntegrityError) as error:
+                errors.extend(_located_errors(error, code, lines[0]))
+        if errors: raise HTTPException(status_code=422, detail=errors)
+    return len(prepared), 0
 
 
-def _enterprise_document(code, number, lines, actor, db):
+def _enterprise_command(code, number, lines, actor, db, cache=None):
     resource = RESOURCE_BY_CODE[code]
     first = lines[0]
     if len(lines) > 1 and code != "bills_of_material": raise ValueError(f"Número repetido: {number}")
@@ -159,7 +193,7 @@ def _enterprise_document(code, number, lines, actor, db):
             components = []
             for row in lines:
                 try:
-                    components.append({"product_id": _resolve_code(db, actor, "core:products", row.get("component_sku", "")), "quantity": row.get("component_quantity")})
+                    components.append({"product_id": _resolve_code(db, actor, "core:products", row.get("component_sku", ""), cache), "quantity": row.get("component_quantity")})
                 except ValueError as error:
                     raise HTTPException(status_code=422, detail=_located_errors(error, code, row, "component_sku")) from error
             data[field.key] = components
@@ -167,11 +201,10 @@ def _enterprise_document(code, number, lines, actor, db):
             value = first.get(column_name(field))
             if value not in (None, ""):
                 try:
-                    data[field.key] = _resolve_code(db, actor, field.reference, value) if field.reference else value
+                    data[field.key] = _resolve_code(db, actor, field.reference, value, cache) if field.reference else value
                 except ValueError as error:
                     raise HTTPException(status_code=422, detail=_located_errors(error, code, first, column_name(field))) from error
-    command = RecordCreate(number=number, title=first.get("title", ""), data=data)
-    enterprise.create(resource, command, actor, db, migration_draft=True)
+    return RecordCreate(number=number, title=first.get("title", ""), data=data)
 
 
 def _extra_rows(code, rows, actor, db):

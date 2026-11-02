@@ -3,7 +3,7 @@ from hashlib import sha256
 from uuid import UUID
 from zipfile import ZipFile, BadZipFile, ZIP_DEFLATED
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from app.db.session import get_db
 from app.models.migration_projects import MigrationProject
 from app.security.auth import Actor, require_owner_or_admin, require_second_factor
 from app.services import migration_catalog as catalog, migration_projects as service
+from app.services import migration_jobs
 from app.services.migration_examples import example_rows
 from app.services.migration_workbooks import csv_bytes, workbook_bytes, group_workbook_bytes
 from app.services.migration_files import recognize_file, reject, issue, MAX_FILE_BYTES, MAX_BATCH_BYTES, MAX_FILES, SHEET_NAMES
@@ -56,7 +57,7 @@ def projects(actor: Actor = Depends(require_owner_or_admin), db: Session = Depen
     if not service.available(db): return {"ready": False, "projects": []}
     allowed = set(catalog.accessible(actor, db))
     rows = db.scalars(select(MigrationProject).where(MigrationProject.tenant_id == actor.tenant_id).order_by(MigrationProject.created_at.desc()).limit(200)).all()
-    return {"ready": True, "projects": [{"id": row.id, "name": row.name, "groups": row.group_codes, "status": row.status, "created_by": row.created_by, "created_at": row.created_at, "object_count": len(row.object_codes)} for row in rows if set(row.object_codes) <= allowed]}
+    return {"ready": True, "projects": [{"id": row.id, "name": row.name, "groups": row.group_codes, "status": row.status, "created_by": row.created_by, "created_at": row.created_at, "object_count": len(row.object_codes), "job": row.simulation.get("job")} for row in rows if set(row.object_codes) <= allowed]}
 
 
 @router.post("", status_code=201)
@@ -65,8 +66,11 @@ def create(body: CreateProject, actor: Actor = Depends(require_owner_or_admin), 
 
 
 @router.get("/{project_id}")
-def detail(project_id: UUID, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
-    return service.payload(db, service.get_project(db, actor, project_id))
+def detail(project_id: UUID, background_tasks: BackgroundTasks, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+    project = service.get_project(db, actor, project_id)
+    result = service.payload(db, project)
+    if migration_jobs.pending(project): background_tasks.add_task(migration_jobs.dispatch, project_id)
+    return result
 
 
 def workbook_template(code, db, prefix):
@@ -189,18 +193,28 @@ def group_workbook(project_id: UUID, example: bool = False, actor: Actor = Depen
 
 
 @router.post("/{project_id}/simulate")
-def simulate(project_id: UUID, body: Version, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
+def simulate(project_id: UUID, body: Version, background_tasks: BackgroundTasks, response: Response, background: bool = False, actor: Actor = Depends(require_owner_or_admin), db: Session = Depends(get_db)):
     try:
         project = service.get_project(db, actor, project_id, lock=True)
+        if background:
+            result = finish(db, migration_jobs.request(db, actor, project, body.version, "simulate"))
+            background_tasks.add_task(migration_jobs.dispatch, project_id)
+            response.status_code = 202
+            return result
         return finish(db, service.simulate(db, actor, project, body.version))
     except Exception:
         db.rollback(); raise
 
 
 @router.post("/{project_id}/commit")
-def commit(project_id: UUID, body: Confirmation, actor: Actor = Depends(require_owner_or_admin), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
+def commit(project_id: UUID, body: Confirmation, background_tasks: BackgroundTasks, response: Response, background: bool = False, actor: Actor = Depends(require_owner_or_admin), _: Actor = Depends(require_second_factor), db: Session = Depends(get_db)):
     try:
         project = service.get_project(db, actor, project_id, lock=True)
+        if background and project.status != "migrated":
+            result = finish(db, migration_jobs.request(db, actor, project, body.version, "commit", digest=body.digest, confirmed=body.confirmed))
+            background_tasks.add_task(migration_jobs.dispatch, project_id)
+            response.status_code = 202
+            return result
         service.commit(db, actor, project, body.version, body.digest, body.confirmed)
         return finish(db, project)
     except OperationalError as error:

@@ -146,3 +146,22 @@ def test_invalid_units_report_all_rows_without_losing_their_field_names(suite):
     # A completely blank row is deliberately ignored, never imported.
     assert {(error["row"], error["field"]) for error in errors} == {(3, "code")}
     assert count(suite[1], UnitOfMeasure) == 0
+
+
+def test_batched_enterprise_rows_preserve_history_and_detect_in_file_unique_keys(suite):
+    from app.models.enterprise import EnterpriseRecordEvent
+    project = create(suite, ["tm"])
+    first = example_rows()["vehicles"][0]
+    duplicate = [{**first, "number": "V-1"}, {**first, "number": "V-2"}]
+    project = bulk(suite, project, [("Vehículos.xlsx", excel([sheet("vehicles", duplicate)]))]).json()
+    project = simulate(suite, project)
+    assert not project["simulation"]["can_commit"]
+    assert project["simulation"]["objects"]["vehicles"]["errors"][0]["field"] == "license_plate"
+    unique = [{**first, "number": f"V-{i}", "license_plate": f"SIM-{i:03}"} for i in range(30)]
+    project = bulk(suite, project, [("Vehículos.xlsx", excel([sheet("vehicles", unique)]))]).json()
+    project = simulate(suite, project)
+    assert project["simulation"]["can_commit"]
+    assert count(suite[1], EnterpriseRecord) == 0
+    result = commit(suite, project)
+    assert result["receipt"]["total_created"] == 30
+    assert count(suite[1], EnterpriseRecord) == count(suite[1], EnterpriseRecordEvent) == 30

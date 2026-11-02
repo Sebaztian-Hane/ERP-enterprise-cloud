@@ -112,7 +112,7 @@ def catalog(actor, db, ready):
     from app.services.migration_files import SHEET_NAMES, MAX_PROJECT_ROWS, MAX_OBJECT_ROWS, MAX_FILE_BYTES, MAX_BATCH_BYTES
     objects = accessible(actor, db)
     suite_ready = enterprise_available(db)
-    return {"ready": ready, "migration": "0066_migration_projects.sql", "limits": {"project_rows": MAX_PROJECT_ROWS, "object_rows": MAX_OBJECT_ROWS, "file_bytes": MAX_FILE_BYTES, "batch_bytes": MAX_BATCH_BYTES}, "groups": groups(objects), "objects": [
+    return {"ready": ready, "migration": "0066_migration_projects.sql", "background_jobs": True, "limits": {"project_rows": MAX_PROJECT_ROWS, "object_rows": MAX_OBJECT_ROWS, "file_bytes": MAX_FILE_BYTES, "batch_bytes": MAX_BATCH_BYTES}, "groups": groups(objects), "objects": [
         {**item, "sheet_name": SHEET_NAMES[code], "schema_ready": suite_ready if code in RESOURCE_BY_CODE else True, "blocked_dependencies": [dep for dep in item["required_dependencies"] if dep not in objects]}
         for code, item in objects.items()
     ]}

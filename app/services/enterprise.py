@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -129,7 +129,7 @@ def _reference(target, value, actor, db, *, active=True):
     return row
 
 
-def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, target_state=None, record_id=None, migration_draft=False) -> tuple[dict, dict]:
+def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, target_state=None, record_id=None, migration_draft=False, reference_cache=None) -> tuple[dict, dict]:
     if len(json.dumps(raw, default=str, ensure_ascii=False).encode("utf-8")) > 65536:
         raise HTTPException(status_code=422, detail="El documento supera 64 KB")
     try:
@@ -138,7 +138,14 @@ def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, t
         issues = [{"loc": item["loc"], "msg": item["msg"], "type": item["type"]} for item in error.errors()]
         raise HTTPException(status_code=422, detail=issues) from error
     data = model.model_dump(mode="json", exclude_none=True)
-    refs = {field.key: _reference(field.reference, data[field.key], actor, db, active=target_state is None) for field in resource.fields if field.reference and data.get(field.key)}
+    def reference(target, value, *, active=None):
+        active = target_state is None if active is None else active
+        key = (str(actor.tenant_id), target, str(value), active)
+        if reference_cache is not None and key in reference_cache: return reference_cache[key]
+        result = _reference(target, value, actor, db, active=active)
+        if reference_cache is not None: reference_cache[key] = result
+        return result
+    refs = {field.key: reference(field.reference, data[field.key]) for field in resource.fields if field.reference and data.get(field.key)}
     for start, end in (("start_date", "end_date"), ("planned_start", "planned_end"), ("departure_date", "arrival_date")):
         if data.get(start) and data.get(end) and data[end] < data[start]:
             raise HTTPException(status_code=422, detail="La fecha final no puede ser anterior a la inicial")
@@ -162,7 +169,7 @@ def validate_data(resource: Resource, raw: dict, actor: Actor, db: Session, *, t
         component_ids = [line["product_id"] for line in data["components"]]
         if len(component_ids) != len(set(component_ids)) or data["product_id"] in component_ids:
             raise HTTPException(status_code=422, detail="Los componentes deben ser únicos y diferentes del producto a fabricar")
-        for product_id in component_ids: _reference("core:products", product_id, actor, db)
+        for product_id in component_ids: reference("core:products", product_id, active=True)
     if resource.code == "inspections" and target_state == "completed":
         if Decimal(data["accepted_quantity"]) + Decimal(data["rejected_quantity"]) != Decimal(data["inspected_quantity"]):
             raise HTTPException(status_code=422, detail="Aceptado más rechazado debe igualar la cantidad inspeccionada")
@@ -217,8 +224,14 @@ def create(resource: Resource, command, actor: Actor, db: Session, *, migration_
     # Only the migration service uses this flag. HTTP forms cannot supply it.
     # It permits linked initial documents, never activation or approval.
     data, _ = validate_data(resource, command.data, actor, db, migration_draft=migration_draft)
-    row = EnterpriseRecord(tenant_id=actor.tenant_id, module_code=resource.module, resource_code=resource.code, number=command.number, title=command.title, data=data, derived={}, status=resource.initial, version=1, created_by=actor.user_id, updated_by=actor.user_id)
-    db.add(row); db.flush()
+    return persist_initial(resource, command, data, actor, db)
+
+
+def persist_initial(resource, command, data, actor, db, *, flush=True):
+    """Persist already validated initial data and identical audit/history evidence."""
+    row = EnterpriseRecord(id=uuid4(), tenant_id=actor.tenant_id, module_code=resource.module, resource_code=resource.code, number=command.number, title=command.title, data=data, derived={}, status=resource.initial, version=1, created_by=actor.user_id, updated_by=actor.user_id)
+    db.add(row)
+    if flush: db.flush()
     add_event(db, row, actor, "create", None, "Alta del documento")
     return row
 
