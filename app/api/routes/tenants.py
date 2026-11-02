@@ -1,4 +1,5 @@
 from uuid import UUID
+from app.security.action_confirmation import consume_new_tenant_confirmation
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.core.config import get_settings
@@ -102,6 +103,7 @@ def create_tenant(request: Request, response: Response, data: TenantCreate, user
     tenant = Tenant(name=data.name, timezone=data.timezone)
     db.add(tenant)
     db.flush()
+    consume_new_tenant_confirmation(request, db, tenant.id)
     db.add(TenantMembership(tenant_id=tenant.id, user_id=user_id, role_code="owner"))
     record(db, tenant_id=tenant.id, actor_user_id=user_id, action="create", module="tenants", entity="tenant", entity_id=tenant.id)
     db.commit()

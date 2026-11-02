@@ -14,12 +14,13 @@ def test_idempotency_header_is_allowed_by_cors_preflight():
         headers={
             "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "authorization, content-type, x-tenant-id, idempotency-key",
+            "Access-Control-Request-Headers": "authorization, content-type, x-tenant-id, idempotency-key, x-action-confirmation",
         },
     )
 
     assert response.status_code == 200
     assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
+    assert "x-action-confirmation" in response.headers["access-control-allow-headers"].lower()
 
 
 def test_unhandled_error_keeps_cors_header_for_browser_clients():

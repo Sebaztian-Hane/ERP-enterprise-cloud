@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
+from app.security.action_confirmation import enforce_action_confirmation
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -66,6 +67,7 @@ def migration_client(monkeypatch):
                 db.rollback()
 
         app.dependency_overrides[get_actor] = lambda: state["actor"]
+        app.dependency_overrides[enforce_action_confirmation] = lambda: None
         app.dependency_overrides[get_db] = database
         monkeypatch.setattr(auth, "module_is_enabled", lambda *_: True)
         monkeypatch.setattr(imports, "record", lambda *_args, **_kwargs: None)

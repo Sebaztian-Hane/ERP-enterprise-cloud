@@ -81,11 +81,11 @@ app.add_middleware(
     allow_credentials=True,
     # The API only exposes read, create and partial-update endpoints.  Keeping
     # this list explicit prevents browsers from preflighting unused verbs.
-    allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     # Browser clients must be allowed to send the replay key on cross-origin
     # POST requests. Omitting it makes the browser reject the preflight before
     # any command reaches the idempotency layer.
-    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "Idempotency-Key"],
+    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "Idempotency-Key", "X-Action-Confirmation"],
 )
 app.include_router(api_router)
 

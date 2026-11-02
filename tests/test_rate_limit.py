@@ -25,4 +25,4 @@ def test_cors_only_advertises_methods_used_by_the_api():
     assert "GET" in allowed_methods
     assert "POST" in allowed_methods
     assert "PATCH" in allowed_methods
-    assert "DELETE" not in allowed_methods
+    assert "DELETE" in allowed_methods  # Approval-delegation revocation uses DELETE.

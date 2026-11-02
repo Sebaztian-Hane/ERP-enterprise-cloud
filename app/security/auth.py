@@ -161,7 +161,7 @@ def require_second_factor(actor: Actor = Depends(get_actor)) -> Actor:
     if actor.assurance_level != "aal2":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Esta operación requiere verificación en dos pasos. Configúrala o verifícala desde Mi perfil.",
+            detail={"code": "MFA_SESSION_REQUIRED", "message": "Verifica tu autenticador para continuar", "action": "Verificar el segundo factor de la sesión"},
         )
     return actor
 

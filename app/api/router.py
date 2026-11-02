@@ -1,9 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from app.security.action_confirmation import enforce_action_confirmation
 from app.api.routes import enterprise
 from app.api.routes import migration_projects
 from app.api.routes import accounts, auth, customers, deliveries, documents, imports, inventory, legal_entities, notifications, operations, payments, platform, products, purchases, rag, reconciliation, reports, sales, suppliers, tenants, treasury, workflow
 
-api_router = APIRouter(prefix="/api/v1")
+api_router = APIRouter(prefix="/api/v1", dependencies=[Depends(enforce_action_confirmation)])
 api_router.include_router(auth.router)
 api_router.include_router(platform.router)
 api_router.include_router(customers.router)

@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from app.security.action_confirmation import enforce_action_confirmation
 from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -63,6 +64,7 @@ def suite(monkeypatch):
             finally: db.rollback()
 
         app.dependency_overrides[get_actor] = lambda: state["actor"]
+        app.dependency_overrides[enforce_action_confirmation] = lambda: None
         app.dependency_overrides[get_db] = database
         monkeypatch.setattr(auth, "module_is_enabled", lambda *_: True)
         monkeypatch.setattr(service, "module_is_enabled", lambda *_: True)

@@ -6,6 +6,7 @@ server. The /oreo front-end path is merely an entry point, never authorization.
 """
 
 from uuid import UUID
+from app.security.action_confirmation import consume_new_tenant_confirmation
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
@@ -193,9 +194,10 @@ async def create_platform_tenant(request: Request, response: Response, data: Pla
     # Validate server-side encryption before provisioning an external auth user.
     # The plaintext is intentionally discarded immediately after ciphertext is made.
     persona_token_ciphertext = encrypt_persona_token(data.apisunat_persona_token)
-    user_id = await create_user(get_settings(), email=str(data.owner_email), temporary_password=data.temporary_password)
     tenant = Tenant(name=data.name.strip(), timezone=data.timezone, business_profile=data.business_profile)
     db.add(tenant); db.flush()
+    consume_new_tenant_confirmation(request, db, tenant.id)
+    user_id = await create_user(get_settings(), email=str(data.owner_email), temporary_password=data.temporary_password)
     legal_entity = LegalEntity(
         tenant_id=tenant.id, code="PRINCIPAL", legal_name=data.name.strip(),
         trade_name=data.name.strip(), tax_id=data.issuer_ruc, fiscal_address=data.fiscal_address.strip(),

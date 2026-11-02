@@ -20,6 +20,7 @@ from app.models.entities import (Tenant, TenantMembership, TenantModuleSetting, 
 from app.models.enterprise import EnterpriseRecord, EnterpriseRecordEvent
 from app.models.migration_projects import MigrationProject, MigrationObject
 from app.security.auth import Actor, get_actor
+from app.security.action_confirmation import enforce_action_confirmation
 from app.services import audit
 from app.services.migration_catalog import DEFINITIONS
 from app.services.migration_examples import example_rows
@@ -54,6 +55,9 @@ def suite(monkeypatch):
             finally: db.rollback()
         app.dependency_overrides[get_db] = database
         app.dependency_overrides[get_actor] = lambda: state["actor"]
+        # This suite isolates migration logic; signed per-command MFA is tested
+        # through the real guard in test_action_confirmation.py.
+        app.dependency_overrides[enforce_action_confirmation] = lambda: None
         # No external integration; retain the actual audit writes to test rollback.
         monkeypatch.setattr(audit, "queue_sync_event", lambda *_args, **_kwargs: None)
         with TestClient(app) as client: yield client, db, state, other, member
